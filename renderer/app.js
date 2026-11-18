@@ -1,0 +1,613 @@
+'use strict';
+/**
+ * 流量台 · 界面主逻辑
+ * 承袭云上晴雨的桌面机制接口（window.flow），内容替换为流量监控。
+ */
+(() => {
+  const $ = id => document.getElementById(id);
+  const pad = n => String(n).padStart(2, '0');
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+  const RATE_RANGES = [['live', '实时'], ['1h', '近 1 小时'], ['6h', '近 6 小时'], ['12h', '近 12 小时'], ['rate24', '近 24 小时']];
+  const TRAFFIC_RANGES = [['24h', '今日'], ['yesterday', '昨日'], ['week', '本周'], ['lastweek', '上周'], ['month', '本月'], ['lastmonth', '上月'], ['year', '本年'], ['all', '全部']];
+  const DIR_OPTS = [['both', '双向'], ['up', '仅上传'], ['down', '仅下载']];
+  const RATE_CHOICES = [0.1, 0.2, 0.5, 1, 3, 5, 10];
+  const TRAFFIC_CHOICES = [5, 10, 30, 60, 300, 600, 1800];
+  const LIVE_CHOICES = [30, 60, 180, 300, 600, 1800];
+
+  const state = {
+    settings: null, collect: null,
+    overview: null, downloaders: [], isDemo: false,
+    periods: { day: null, week: null, month: null, year: null },
+    rate: { range: 'live', dir: 'both', offset: 0, data: null, hover: null },
+    traffic: { range: '24h', dir: 'both', offset: 0, data: null, hover: null },
+    chartPick: new Set(['all']), // 选中的下载器（'all' 或 id 字符串）
+    refreshTimer: null, lastUpdate: 0, fetching: false
+  };
+
+  /* ================= 格式化 ================= */
+  function fmtBytes(n, digits) {
+    n = Number(n) || 0;
+    if (n < 0) return '-' + fmtBytes(-n, digits);
+    const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+    let i = 0, v = n;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    const d = digits != null ? digits : (i === 0 ? 0 : (v < 10 ? 2 : (v < 100 ? 1 : 0)));
+    return v.toFixed(d) + ' ' + units[i];
+  }
+  function fmtRate(n) {
+    n = Number(n) || 0;
+    if (n <= 0) return '0 B/s';
+    return fmtBytes(n, n < 1024 ? 0 : (n < 10240 ? 1 : 0)) + '/s';
+  }
+  const fmtSpanTitle = (a, b) => {
+    const f = t => { const d = new Date((Number(t) + 8 * 3600) * 1000); return `${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`; };
+    return f(a) + ' ~ ' + f(b);
+  };
+  const fmtSpanMid = sp => {
+    const t = (Number(sp[0]) + Number(sp[1])) / 2;
+    const d = new Date((t + 8 * 3600) * 1000);
+    return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+  };
+
+  /* ================= 时钟与天空 ================= */
+  function tickClock() {
+    const now = new Date();
+    $('clockHM').textContent = pad(now.getHours()) + ':' + pad(now.getMinutes());
+    $('clockSec').textContent = pad(now.getSeconds());
+    $('pillTime').textContent = pad(now.getHours()) + ':' + pad(now.getMinutes());
+    $('pillSec').textContent = pad(now.getSeconds());
+    const wd = ['日', '一', '二', '三', '四', '五', '六'][now.getDay()];
+    const dateStr = `${now.getMonth() + 1}月${now.getDate()}日 周${wd}`;
+    $('dateLine').textContent = dateStr;
+    $('pillDate').textContent = dateStr;
+    // 昼夜：按当前时间（简化：6:00–18:00 为昼，接入后可改为按地区日出日落）
+    // window.__forceNight 供截图/调试强制指定，否则每秒 tick 会把外部手动加的 .night 类冲掉
+    const isDay = now.getHours() >= 6 && now.getHours() < 18;
+    const forced = window.__forceNight;
+    document.documentElement.classList.toggle('night', forced == null ? !isDay : !!forced);
+    // 数据超龄补刷（60s 粒度，窗口隐藏时不刷）
+    const ms = Date.now();
+    if (ms - lastStaleCheck > 60000) {
+      lastStaleCheck = ms;
+      if (!document.hidden && state.lastUpdate && ms - state.lastUpdate > 15000) refreshAll(false);
+    }
+  }
+  let lastStaleCheck = 0;
+
+  /* ================= 数据加载 ================= */
+  async function refreshAll(animate) {
+    if (state.fetching) return;
+    // 窗口隐藏（收起小窗 / 最小化）时不做无意义的整屏刷新：既省电也避免隐藏期间堆积请求
+    if (document.hidden) return;
+    state.fetching = true;
+    try {
+      const [overview, isDemo] = await Promise.all([
+        window.flow.overview(), window.flow.isDemo()
+      ]);
+      state.overview = overview;
+      state.isDemo = isDemo;
+      state.downloaders = overview.downloaders || [];
+      state.lastUpdate = Date.now();
+      renderHero();
+      renderSummary();
+      renderDownloaders();
+      await Promise.all([
+        loadPeriod('day'), loadPeriod('week'), loadPeriod('month'), loadPeriod('year'),
+        loadChart('rate'), loadChart('traffic')
+      ]);
+      updateTrayInfo();
+    } catch (e) {
+      console.error('[app] refresh failed', e);
+    } finally { state.fetching = false; }
+  }
+  async function loadPeriod(gran) {
+    try { state.periods[gran] = await window.flow.periods(gran); renderSummary(); } catch (e) { }
+  }
+  async function loadChart(which) {
+    const st = state[which];
+    try {
+      const data = await window.flow.chart({ range: st.range, metric: which, offset: st.offset });
+      st.data = data;
+      if (which === 'rate') drawRate(animateFlag); else drawTraffic(animateFlag);
+    } catch (e) { console.error('[app] chart ' + which, e); }
+  }
+  let animateFlag = false;
+
+  /* ================= 渲染 Hero ================= */
+  function renderHero() {
+    const o = state.overview; if (!o) return;
+    const t = o.total || {};
+    $('heroUp').textContent = '↑ ' + fmtRate(t.up_rate);
+    $('heroDown').textContent = '↓ ' + fmtRate(t.dl_rate);
+    // 小窗实时速率
+    $('pillUp').textContent = '↑ ' + fmtRate(t.up_rate);
+    $('pillDown').textContent = '↓ ' + fmtRate(t.dl_rate);
+    const today = t.day || {};
+    $('pillTodayUp').textContent = '今 ↑' + fmtBytes(today.up);
+    $('pillTodayDown').textContent = '今 ↓' + fmtBytes(today.dl);
+    const online = t.online || 0, count = t.count || 0;
+    const hp = $('healthPill');
+    hp.classList.toggle('off', online === 0 && count > 0);
+    $('healthTxt').textContent = state.isDemo ? '演示数据' : (count ? `${online}/${count} 在线` : '未配置下载器');
+    $('srcLine').textContent = state.isDemo
+      ? '演示数据 · 在设置里添加下载器后自动切换为真实数据'
+      : `累计计数器差分统计 · ${count} 台下载器`;
+    $('lastUpdate').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  }
+
+  /* ================= 渲染四周期卡片 ================= */
+  function renderSummary() {
+    const o = state.overview; if (!o) return;
+    const defs = [
+      ['day', '今日'], ['week', '本周'], ['month', '本月'], ['year', '本年']
+    ];
+    const box = $('summaryCards');
+    box.innerHTML = defs.map(([key, label]) => {
+      const v = (o.total && o.total[key]) || { up: 0, dl: 0 };
+      const hist = state.periods[key];
+      let histHtml = '';
+      if (hist && hist.items && hist.items.length > 1) {
+        const it = hist.items[0];
+        histHtml = `<span class="sum-history" data-period="${key}" title="点击查看历史数据">历史数据 ▾</span>`;
+      }
+      return `<div class="sum-card" data-summary="${key}">
+        <div class="sum-period"><span>${label}</span><span class="sum-range">${esc(key === 'day' ? '' : (v.up ? '' : ''))}</span></div>
+        <div class="sum-vals">
+          <div class="sum-row up"><span class="lbl">上传</span><span class="num">${fmtBytes(v.up)}</span></div>
+          <div class="sum-row down"><span class="lbl">下载</span><span class="num">${fmtBytes(v.dl)}</span></div>
+        </div>
+        ${histHtml}
+      </div>`;
+    }).join('');
+    box.querySelectorAll('.sum-card').forEach(el => {
+      el.addEventListener('click', () => showSummaryDetail(el.getAttribute('data-summary')));
+    });
+    box.querySelectorAll('.sum-history').forEach(el => {
+      el.addEventListener('click', e => { e.stopPropagation(); showPeriodHistory(el.getAttribute('data-period')); });
+    });
+  }
+
+  /* ================= 渲染下载器列表 ================= */
+  function renderDownloaders() {
+    const list = state.downloaders;
+    const strip = $('dlStrip');
+    let html = `<div class="dl-card summary" id="dlSummary">
+      <div>
+        <div class="dl-top"><span class="dl-name">汇总 · 全部下载器${state.isDemo ? '<span class="demo-badge">演示</span>' : ''}</span></div>
+        <div class="dl-sum-rates">
+          <span class="u" id="sumUp">↑ ${fmtRate(state.overview.total.up_rate)}</span>
+          <span class="d" id="sumDown">↓ ${fmtRate(state.overview.total.dl_rate)}</span>
+        </div>
+      </div>
+      <div class="dl-updated" id="sumToday">今日 ↑${fmtBytes(state.overview.total.day.up)} ↓${fmtBytes(state.overview.total.day.dl)}</div>
+    </div>`;
+    for (const d of list) {
+      const online = d.status === 'online';
+      html += `<div class="dl-card" data-dl="${d.id}">
+        <div class="dl-top">
+          <span class="dl-dot ${online ? '' : 'off'}" title="${online ? '在线' : '离线'}"></span>
+          <span class="dl-name" title="${esc(d.name)}">${esc(d.name)}</span>
+          <span class="dl-type">${d.type === 'tr' ? 'TR' : 'QB'}</span>
+          <span class="dl-switch ${d.enabled ? 'on' : ''}" data-switch="${d.id}" title="加入/移出图表"></span>
+        </div>
+        <div class="dl-rates">
+          <span class="u">↑ ${fmtRate(d.up_rate)}</span>
+          <span class="d">↓ ${fmtRate(d.dl_rate)}</span>
+        </div>
+      </div>`;
+    }
+    strip.innerHTML = html;
+    $('dlSummary').addEventListener('click', () => showSummaryDetailAll());
+    strip.querySelectorAll('.dl-card[data-dl]').forEach(el => {
+      el.addEventListener('click', e => {
+        if (e.target.classList.contains('dl-switch')) return;
+        showDlDetail(Number(el.getAttribute('data-dl')));
+      });
+    });
+    strip.querySelectorAll('.dl-switch').forEach(el => {
+      el.addEventListener('click', async e => {
+        e.stopPropagation();
+        const id = Number(el.getAttribute('data-switch'));
+        const d = state.downloaders.find(x => x.id === id);
+        if (!d) return;
+        const on = !d.enabled;
+        el.classList.toggle('on', on);
+        d.enabled = on;
+        try { await window.flow.dlUpdate(id, { ...d, password: '' }); refreshAll(false); } catch (ex) { console.error(ex); }
+      });
+    });
+  }
+
+  /* ================= 图表绘制 ================= */
+  function adapt(hex, theme) {
+    // 与 charts.js 的 adapt 口径一致：浅色主题下加深，深色下提亮（由 charts 内部处理，这里直接传原色）
+    return hex;
+  }
+  function dirsOf(dir) { return { up: dir === 'both' || dir === 'up', down: dir === 'both' || dir === 'down' }; }
+  function pickSeries(data) {
+    if (!data || !data.series) return [];
+    const all = state.chartPick.has('all');
+    return all ? data.series : data.series.filter(s => s.id === 0 || state.chartPick.has(String(s.id)));
+  }
+  function drawRate(animate) {
+    const st = state.rate, data = st.data; if (!data) return;
+    const cv = $('rateChart');
+    const dirs = dirsOf(st.dir);
+    const series = pickSeries(data);
+    const lines = [];
+    for (const s of series) {
+      const isSum = s.id === 0, width = isSum ? 1.7 : 0.9;
+      const name = isSum ? '汇总' : s.name;
+      const cu = adapt(s.color_up), cd = adapt(s.color_down);
+      if (dirs.up) lines.push({ label: name + ' ↑', name, dir: 'up', color: cu, width, values: s.up });
+      if (dirs.down) lines.push({ label: name + ' ↓', name, dir: 'down', color: cd, width, values: s.down });
+    }
+    TTMCharts.drawLines(cv, {
+      labels: data.labels, times: data.times, lines, fmt: fmtRate, smooth: true,
+      animate: !!animate, theme: document.documentElement.classList.contains('night') ? 'dark' : 'light',
+      hover: st.hover, axis: $('rateAxis'), axisLabels: data.labels, edges: data.window && data.window.edges,
+      empty: '该时间范围暂无采样数据，等待采集器写入…'
+    });
+    renderLegend('rateLegend', series, dirs, lines);
+    const r = RATE_RANGES.find(x => x[0] === st.range);
+    $('rateRangeTrigger').textContent = (r ? r[1] : '实时') + (st.offset ? ` · 回看${st.offset}` : '');
+    $('ratePanRange').textContent = data.window ? data.window.label : '';
+    $('rateLatest').hidden = !st.offset;
+  }
+  function drawTraffic(animate) {
+    const st = state.traffic, data = st.data; if (!data) return;
+    const cv = $('trafficChart');
+    const dirs = dirsOf(st.dir);
+    const parts = pickSeries(data).filter(s => s.id !== 0);
+    const groups = data.labels.map((label, i) => {
+      const upParts = parts.map(p => ({ name: p.name, color: adapt(p.color_up), value: Number(p.up[i]) || 0 }));
+      const downParts = parts.map(p => ({ name: p.name, color: adapt(p.color_down), value: Number(p.down[i]) || 0 }));
+      return { label, upParts, downParts,
+        up: upParts.reduce((a, p) => a + p.value, 0),
+        down: downParts.reduce((a, p) => a + p.value, 0) };
+    });
+    const spanRange = ['24h', 'yesterday'].indexOf(st.range) >= 0;
+    const tipTitles = spanRange ? (data.spans || []).map(sp => sp ? fmtSpanTitle(sp[0], sp[1]) : '') : null;
+    let axisLabels = data.labels;
+    if (spanRange && data.spans) axisLabels = data.spans.map(sp => sp ? fmtSpanMid(sp) : '');
+    TTMCharts.drawBars(cv, {
+      labels: data.labels, groups, dirs, fmt: v => fmtBytes(v), hover: st.hover,
+      theme: document.documentElement.classList.contains('night') ? 'dark' : 'light',
+      axis: $('trafficAxis'), axisLabels, tipTitles, empty: '该时间范围暂无数据'
+    });
+    renderLegend('trafficLegend', pickSeries(data), dirs, null);
+    const su = groups.reduce((a, g) => a + g.up, 0), sd = groups.reduce((a, g) => a + g.down, 0);
+    $('trafficSummary').innerHTML =
+      `<div>区间上传<b class="u">${fmtBytes(dirs.up ? su : 0)}</b></div>` +
+      `<div>区间下载<b class="d">${fmtBytes(dirs.down ? sd : 0)}</b></div>` +
+      `<div>合计<b>${fmtBytes((dirs.up ? su : 0) + (dirs.down ? sd : 0))}</b></div>`;
+    const rr = TRAFFIC_RANGES.find(x => x[0] === st.range);
+    $('trafficRangeTrigger').textContent = (rr ? rr[1] : '今日') + (st.offset ? ` · 回看${st.offset}` : '');
+    $('trafficPanRange').textContent = data.window ? data.window.label : '';
+    $('trafficLatest').hidden = !st.offset;
+  }
+  function renderLegend(id, series, dirs, lines) {
+    let html = '';
+    for (const s of series) {
+      const name = s.id === 0 ? '汇总' : s.name;
+      if (dirs.up) html += `<span class="pair" style="color:${s.color_up}"><i class="sq" style="background:${s.color_up}"></i><b class="arw">↑</b>${esc(name)}</span>`;
+      if (dirs.down) html += `<span class="pair" style="color:${s.color_down}"><i class="sq" style="background:${s.color_down}"></i><b class="arw">↓</b>${esc(name)}</span>`;
+    }
+    $(id).innerHTML = html;
+  }
+
+  // 后续部分见文件末尾（事件绑定与设置）
+  window.__flowState = state;
+  window.__flowFmt = { fmtBytes, fmtRate, esc };
+  window.__flowRefresh = refreshAll;
+  window.__flowLoadChart = loadChart;
+  window.__flowDrawRate = drawRate;
+  window.__flowDrawTraffic = drawTraffic;
+
+  /* ================= 下拉交互 ================= */
+  function bindDropdown(triggerId, menuId, options, current, onSelect) {
+    const trig = $(triggerId), menu = $(menuId);
+    function render() {
+      menu.innerHTML = options.map(([v, l]) => `<button data-v="${v}" class="${v === current() ? 'active' : ''}">${esc(l)}</button>`).join('');
+    }
+    trig.addEventListener('click', e => { e.stopPropagation(); closeAllMenus(); render(); menu.hidden = !menu.hidden; });
+    menu.addEventListener('click', e => {
+      const b = e.target.closest('button'); if (!b) return;
+      onSelect(b.getAttribute('data-v')); menu.hidden = true;
+    });
+  }
+  function closeAllMenus() {
+    document.querySelectorAll('.dd-menu').forEach(m => m.hidden = true);
+  }
+  bindDropdown('rateRangeTrigger', 'rateRangeMenu', RATE_RANGES, () => state.rate.range, v => {
+    state.rate.range = v; state.rate.offset = 0; loadChart('rate');
+  });
+  bindDropdown('rateDirTrigger', 'rateDirMenu', DIR_OPTS, () => state.rate.dir, v => { state.rate.dir = v; drawRate(false); });
+  $('rateDirTrigger').textContent = '方向 · 双向';
+  const rateDirMenu = $('rateDirMenu');
+  rateDirMenu.addEventListener('click', () => {
+    const v = state.rate.dir;
+    $('rateDirTrigger').textContent = '方向 · ' + (DIR_OPTS.find(x => x[0] === v) || [])[1];
+  });
+  bindDropdown('trafficRangeTrigger', 'trafficRangeMenu', TRAFFIC_RANGES, () => state.traffic.range, v => {
+    state.traffic.range = v; state.traffic.offset = 0; loadChart('traffic');
+  });
+  bindDropdown('trafficDirTrigger', 'trafficDirMenu', DIR_OPTS, () => state.traffic.dir, v => { state.traffic.dir = v; drawTraffic(false); });
+  $('trafficDirTrigger').textContent = '方向 · 双向';
+  $('trafficDirMenu').addEventListener('click', () => {
+    const v = state.traffic.dir;
+    $('trafficDirTrigger').textContent = '方向 · ' + (DIR_OPTS.find(x => x[0] === v) || [])[1];
+  });
+  document.addEventListener('click', closeAllMenus);
+
+  $('rateLatest').addEventListener('click', () => { state.rate.offset = 0; loadChart('rate'); });
+  $('trafficLatest').addEventListener('click', () => { state.traffic.offset = 0; loadChart('traffic'); });
+
+  /* ================= 面板 / 窗口按钮 ================= */
+  function openSettings() { $('settingsPanel').classList.add('open'); }
+  function closeSettings() { $('settingsPanel').classList.remove('open'); }
+  $('btnSettings').addEventListener('click', openSettings);
+  $('closeSettings').addEventListener('click', closeSettings);
+  $('btnClose').addEventListener('click', () => window.flow.winAction('close'));
+  $('btnPin').addEventListener('click', async () => {
+    const on = await window.flow.winAction('pin');
+    $('btnPin').style.color = on ? 'var(--sun-deep)' : '';
+  });
+  $('btnRefresh').addEventListener('click', () => refreshAll(false));
+  $('btnRefreshData').addEventListener('click', () => refreshAll(false));
+
+  /* ================= 键盘快捷键 ================= */
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { closeSettings(); $('detailModal').hidden = true; closeAllMenus(); }
+    else if (e.key === 'F5') { e.preventDefault(); refreshAll(false); }
+    else if (e.ctrlKey && e.key === ',') { e.preventDefault(); openSettings(); }
+    else if (e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+      e.preventDefault();
+      const delta = e.key === 'ArrowLeft' ? 1 : -1;
+      const st = state.traffic;
+      st.offset = Math.max(0, st.offset + delta);
+      loadChart('traffic');
+    }
+  });
+
+  /* ================= 设置面板逻辑 ================= */
+  function bindSettings() {
+    // 下载器配置列表
+    renderDlConfig();
+    // 表单提交
+    $('dlForm').addEventListener('submit', async e => {
+      e.preventDefault();
+      const id = Number($('fId').value) || 0;
+      const d = {
+        name: $('fName').value.trim(), type: $('fType').value, url: $('fUrl').value.trim(),
+        username: $('fUser').value.trim(), password: $('fPass').value, enabled: $('fEnabled').checked
+      };
+      if (!d.name || !d.url) { $('formMsg').textContent = '请填写名称和地址'; return; }
+      // 地址必须 http(s)://，否则客户端发请求时会抛难懂的底层错误
+      if (!/^https?:\/\//i.test(d.url)) { $('formMsg').textContent = '地址要以 http:// 或 https:// 开头'; return; }
+      try { new URL(d.url); } catch (_) { $('formMsg').textContent = '地址格式不正确'; return; }
+      const res = id ? await window.flow.dlUpdate(id, d) : await window.flow.dlAdd(d);
+      if (res && res.error) { $('formMsg').textContent = res.error; return; }
+      $('formMsg').textContent = '已保存';
+      resetForm(); renderDlConfig(); refreshAll(false);
+    });
+    $('btnTest').addEventListener('click', async () => {
+      const d = { name: $('fName').value.trim(), type: $('fType').value, url: $('fUrl').value.trim(), username: $('fUser').value.trim(), password: $('fPass').value };
+      if (!/^https?:\/\//i.test(d.url)) { $('formMsg').textContent = '地址要以 http:// 或 https:// 开头'; return; }
+      $('formMsg').textContent = '测试中…';
+      let r;
+      try { r = await window.flow.dlTest(d); } catch (err) { r = { ok: false, error: String((err && err.message) || err) }; }
+      $('formMsg').textContent = r && r.ok
+        ? `连接成功 · ${r.version || '未知版本'} · ↑${fmtRate(r.up_rate)} ↓${fmtRate(r.dl_rate)}`
+        : ('失败：' + ((r && r.error) || '无法连接'));
+    });
+    $('btnResetForm').addEventListener('click', resetForm);
+    $('btnRecolor').addEventListener('click', async () => { await window.flow.dlRecolor(); refreshAll(false); });
+    // 采集选项
+    renderCollectOptions();
+    $('btnSaveCollect').addEventListener('click', async () => {
+      const safe = {};
+      if (window._pollSel != null) safe.poll_interval = window._pollSel;
+      if (window._trafficSel != null) safe.traffic_interval = window._trafficSel;
+      if (window._liveSel != null) safe.live_span = window._liveSel;
+      state.collect = await window.flow.settingsCollect(safe);
+      $('collectMsg').textContent = '已保存，采集已重启';
+      renderCollectInfo();
+    });
+    $('btnQuit').addEventListener('click', () => window.flow.winAction('quit'));
+    // 窗口设置
+    if (state.settings) {
+      $('chkTop').checked = !!state.settings.alwaysOnTop;
+      $('chkAuto').checked = !!state.settings.autoLaunch;
+      $('chkEdgeDock').checked = state.settings.edgeDock !== false;
+      $('chkTrayInfo').checked = state.settings.trayInfo !== false;
+      $('motionSelect').value = state.settings.motion || 'on';
+    }
+    const winPatch = k => window.flow.updateSettings({ [k]: document.querySelector('#' + k).checked });
+    $('chkTop').addEventListener('change', () => { window.flow.updateSettings({ alwaysOnTop: $('chkTop').checked }); });
+    $('chkAuto').addEventListener('change', () => { window.flow.updateSettings({ autoLaunch: $('chkAuto').checked }); });
+    $('chkEdgeDock').addEventListener('change', () => { window.flow.updateSettings({ edgeDock: $('chkEdgeDock').checked }); });
+    $('chkTrayInfo').addEventListener('change', () => { state.settings.trayInfo = $('chkTrayInfo').checked; });
+    $('motionSelect').addEventListener('change', () => {
+      const off = $('motionSelect').value === 'off';
+      document.documentElement.classList.toggle('motion-off', off);
+    });
+    // 设置页切换
+    document.querySelectorAll('.st-nav').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.st-nav').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        document.querySelectorAll('.st-page').forEach(p => p.hidden = p.getAttribute('data-page') !== btn.getAttribute('data-page'));
+      });
+    });
+  }
+  function resetForm() {
+    $('fId').value = ''; $('fName').value = ''; $('fType').value = 'qb'; $('fUrl').value = '';
+    $('fUser').value = ''; $('fPass').value = ''; $('fEnabled').checked = true; $('formTitle').textContent = '添加下载器';
+  }
+  async function renderDlConfig() {
+    const list = await window.flow.downloaders();
+    state.downloaders = list;
+    const box = $('dlConfigList');
+    box.innerHTML = list.length ? list.map(d => `<div class="dl-config-row" data-id="${d.id}">
+      <span class="cname">${esc(d.name)}</span><span class="ctype">${d.type === 'tr' ? 'TR' : 'QB'}</span>
+      <button data-act="edit">编辑</button><button data-act="del" class="del">删除</button>
+    </div>`).join('') : '<p class="hint">暂无下载器。当前为演示数据，添加后自动切换为真实数据。</p>';
+    $('demoHint').textContent = list.length ? '' : '当前演示数据 · 添加下载器即切真实';
+    box.querySelectorAll('.dl-config-row').forEach(row => {
+      const id = Number(row.getAttribute('data-id'));
+      row.querySelector('[data-act="edit"]').addEventListener('click', () => {
+        const d = list.find(x => x.id === id); if (!d) return;
+        $('fId').value = d.id; $('fName').value = d.name; $('fType').value = d.type;
+        $('fUrl').value = d.url; $('fUser').value = d.username; $('fPass').value = '';
+        $('fEnabled').checked = !!d.enabled; $('formTitle').textContent = '编辑下载器'; $('formMsg').textContent = '';
+      });
+      row.querySelector('[data-act="del"]').addEventListener('click', async () => {
+        if (!confirm('确定删除该下载器？')) return;
+        await window.flow.dlDelete(id); renderDlConfig(); refreshAll(false);
+      });
+    });
+  }
+  function renderCollectOptions() {
+    const c = state.collect || {};
+    window._pollSel = c.poll_interval != null ? c.poll_interval : 5;
+    window._trafficSel = c.traffic_interval != null ? c.traffic_interval : 60;
+    window._liveSel = c.live_span != null ? c.live_span : 300;
+    const mk = (arr, cur, key) => arr.map(v => `<button class="chip ${v === cur ? 'active' : ''}" data-v="${v}" data-key="${key}">${v < 60 ? v + ' 秒' : (v / 60) + ' 分'}</button>`).join('');
+    $('pollOptions').innerHTML = mk(RATE_CHOICES, window._pollSel, 'poll');
+    $('trafficPollOptions').innerHTML = mk(TRAFFIC_CHOICES, window._trafficSel, 'traffic');
+    $('liveOptions').innerHTML = mk(LIVE_CHOICES, window._liveSel, 'live');
+    document.querySelectorAll('.opt-row .chip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        const key = chip.getAttribute('data-key'), v = Number(chip.getAttribute('data-v'));
+        chip.parentNode.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
+        chip.classList.add('active');
+        if (key === 'poll') window._pollSel = v;
+        else if (key === 'traffic') window._trafficSel = v;
+        else window._liveSel = v;
+      });
+    });
+    renderCollectInfo();
+  }
+  function renderCollectInfo() {
+    const c = state.collect || {};
+    $('collectCurrent').textContent = `当前：速率 ${c.poll_interval || 5}s · 流量 ${c.traffic_interval || 60}s · 实时窗口 ${c.live_span || 300}s`;
+  }
+
+  /* ================= 详情弹窗 ================= */
+  async function showDlDetail(id) {
+    const d = await window.flow.dlDetail(id); if (!d) return;
+    $('detailTitle').textContent = d.name + ' · 详情';
+    const p = d.periods || {};
+    const row = (label, v, cls) => `<div class="kv"><span>${label}</span><b class="${cls || ''}">${fmtBytes(v)}</b></div>`;
+    let html = `<div class="detail-sec"><h5>连接状态 ${d.version ? '· ' + esc(d.version) : ''}</h5>
+      <div class="hint">${d.status === 'online' ? '在线' : '离线'}${d.error ? ' · ' + esc(d.error) : ''} · ${esc(d.url)}</div></div>`;
+    html += `<div class="detail-sec"><h5>累计流量（自安装记账起）</h5><div class="detail-grid">
+      ${row('今日上传', p.day && p.day.up, 'u')}${row('今日下载', p.day && p.day.dl, 'd')}
+      ${row('本周上传', p.week && p.week.up, 'u')}${row('本周下载', p.week && p.week.dl, 'd')}
+      ${row('本月上传', p.month && p.month.up, 'u')}${row('本月下载', p.month && p.month.dl, 'd')}
+      ${row('本年上传', p.year && p.year.up, 'u')}${row('本年下载', p.year && p.year.dl, 'd')}
+      ${row('累计上传', p.all && p.all.up, 'u')}${row('累计下载', p.all && p.all.dl, 'd')}
+    </div></div>`;
+    if (d.torrents) {
+      const t = d.torrents, c = t.counts || {};
+      html += `<div class="detail-sec"><h5>种子状态</h5><div class="detail-grid">
+        <div class="kv"><span>总数</span><b>${c.total || 0}</b></div><div class="kv"><span>总大小</span><b>${fmtBytes(t.total_size)}</b></div>
+        <div class="kv"><span>做种中</span><b>${c.seeding || 0}</b></div><div class="kv"><span>下载中</span><b>${c.downloading || 0}</b></div>
+        <div class="kv"><span>暂停</span><b>${c.paused || 0}</b></div><div class="kv"><span>错误</span><b>${c.error || 0}</b></div>
+      </div></div>`;
+    }
+    $('detailBody').innerHTML = html;
+    $('detailModal').hidden = false;
+  }
+  async function showSummaryDetailAll() {
+    const d = await window.flow.dlDetailSummary(); if (!d) return;
+    $('detailTitle').textContent = '全部下载器 · 汇总详情';
+    const p = d.periods || {};
+    const row = (label, v, cls) => `<div class="kv"><span>${label}</span><b class="${cls || ''}">${fmtBytes(v)}</b></div>`;
+    let html = `<div class="detail-sec"><h5>全部下载器汇总</h5><div class="detail-grid">
+      ${row('今日上传', p.day && p.day.up, 'u')}${row('今日下载', p.day && p.day.dl, 'd')}
+      ${row('本周上传', p.week && p.week.up, 'u')}${row('本周下载', p.week && p.week.dl, 'd')}
+      ${row('本月上传', p.month && p.month.up, 'u')}${row('本月下载', p.month && p.month.dl, 'd')}
+      ${row('本年上传', p.year && p.year.up, 'u')}${row('本年下载', p.year && p.year.dl, 'd')}
+    </div></div><div class="detail-sec"><h5>逐台明细</h5><div class="detail-grid">`;
+    for (const x of d.downloaders) {
+      html += `<div class="kv"><span>${esc(x.name)} 上传</span><b class="u">${fmtBytes(x.periods.all.up)}</b></div>`;
+      html += `<div class="kv"><span>${esc(x.name)} 下载</span><b class="d">${fmtBytes(x.periods.all.dl)}</b></div>`;
+    }
+    html += '</div></div>';
+    $('detailBody').innerHTML = html; $('detailModal').hidden = false;
+  }
+  function showSummaryDetail(key) { showPeriodHistory(key); }
+  async function showPeriodHistory(gran) {
+    const data = await window.flow.periods(gran); if (!data) return;
+    const names = { day: '日', week: '周', month: '月', year: '年' };
+    $('detailTitle').textContent = `历史${names[gran] || ''}数据`;
+    $('detailBody').innerHTML = `<div class="detail-sec"><h5>最近 ${data.items.length} 个周期</h5>
+      <table style="width:100%;font-size:11px;border-collapse:collapse">
+      <thead><tr style="color:var(--ink-soft);text-align:left"><th style="padding:4px 0">周期</th><th>上传</th><th>下载</th></tr></thead>
+      <tbody>${data.items.map((it, i) => `<tr style="border-top:1px dashed rgba(123,159,196,.2)"><td style="padding:4px 0">${esc(it.label)}${i === 0 ? ' · 当前' : ''}</td><td style="color:var(--up)">${fmtBytes(it.up)}</td><td style="color:var(--down)">${fmtBytes(it.dl)}</td></tr>`).join('')}</tbody></table></div>`;
+    $('detailModal').hidden = false;
+  }
+  $('closeDetail').addEventListener('click', () => $('detailModal').hidden = true);
+  $('detailModal').addEventListener('click', e => { if (e.target === $('detailModal')) $('detailModal').hidden = true; });
+
+  /* ================= 托盘信息 ================= */
+  function updateTrayInfo() {
+    if (!state.overview || state.settings && state.settings.trayInfo === false) return;
+    const t = state.overview.total || {};
+    const txt = `↑${fmtRate(t.up_rate)} ↓${fmtRate(t.dl_rate)} · 今日 ↑${fmtBytes(t.day.up)} ↓${fmtBytes(t.day.dl)}`;
+    window.flow.trayInfo(txt);
+  }
+
+  /* ================= 吸顶小窗拖拽 ================= */
+  (function bindDrag() {
+    const grip = document.querySelector('.pill-grip') || document.querySelector('.hero-top');
+    if (!grip) return;
+    let dragging = false;
+    grip.addEventListener('mousedown', e => {
+      dragging = true; window.flow.winDrag(e.screenX, e.screenY);
+    });
+    window.addEventListener('mousemove', e => { if (dragging) window.flow.winDrag(e.screenX, e.screenY); });
+    window.addEventListener('mouseup', () => { if (dragging) { dragging = false; window.flow.winDragEnd(); } });
+  })();
+
+  /* ================= 初始化 ================= */
+  async function boot() {
+    state.settings = await window.flow.getSettings();
+    try { state.collect = await window.flow.settingsGet(); } catch (e) { }
+    const off = state.settings.motion === 'off';
+    document.documentElement.classList.toggle('motion-off', off);
+    if (state.settings.alwaysOnTop) $('btnPin').style.color = 'var(--sun-deep)';
+    $('panelVersion').textContent = 'v1.0.0';
+    tickClock();
+    if (!window.__clockTimer) window.__clockTimer = setInterval(tickClock, 1000);
+    // 回到前台立刻补一次刷新，避免隐藏期间暂停刷新导致数据看起来是旧的
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) refreshAll(false);
+    });
+    bindSettings();
+    await refreshAll(false);
+    animateFlag = true; // 后续刷新启用帧平移动画
+    // 实时事件：rate 局部刷新
+    window.flow.onData('rate', () => { refreshAll(true); });
+    window.flow.onData('traffic', () => { /* traffic 完成由 rate 事件已覆盖，避免双刷 */ });
+    // 吸顶状态
+    window.flow.onDockState(s => {
+      $('pill').classList.toggle('show', !!s.docked && !s.expanded);
+      $('widget').classList.toggle('dock-hidden', !!s.docked && !s.expanded);
+      if (s.docked) {
+        const pr = document.getElementById('rateChart');
+        if (pr) pr.style.display = '';
+      }
+    });
+    window.flow.onTrayAction(a => {
+      if (!a) return;
+      if (a.type === 'refresh') refreshAll(false);
+      else if (a.type === 'show') window.flow.winAction('show');
+    });
+    // 动态图例 hover（从 charts 的 geom 读取 tooltip 由 charts 内部处理，这里仅占位）
+  }
+  boot();
+})();

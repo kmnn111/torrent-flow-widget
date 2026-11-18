@@ -1,0 +1,23 @@
+# 依赖与构建产物
+node_modules/
+dist/
+dist-gh/
+
+# 调试 / 自检产物
+ui-*.png
+ui-*.jpg
+ui-*.jpeg
+shot-*.png
+*.jpeg.tmp
+
+# 开发留痕（主进程改造脚本 / 探针）
+_build_main.py
+_probe_core.js
+_probe_rate.js
+_shot_block.txt
+
+# 系统与日志
+*.log
+Thumbs.db
+Desktop.ini
+.DS_Store

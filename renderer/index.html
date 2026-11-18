@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; script-src 'self'" />
+  <title>流量台</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="frame">
+    <!-- 天空氛围层（宫崎骏风：暖色天空 + 流云 + 星空夜色） -->
+    <div id="sky">
+      <div id="skyA"></div><div id="skyB"></div>
+      <div id="stars"></div><div id="sun"></div><div id="moon"></div>
+      <div class="clouds"><i class="c1"></i><i class="c2"></i><i class="c3"></i><i class="c4"></i></div>
+    </div>
+
+    <!-- 吸顶流量小窗：拖到屏幕顶端收起，悬停展开 -->
+    <div id="pill">
+      <div class="pill-grip drag" title="按住拖动（拖离顶部即可退出吸顶）"><div class="pill-ico" id="pillIcon">⇅</div></div>
+      <div class="pill-mid">
+        <div class="pill-time"><span id="pillTime">--:--</span><em class="clk-sec" id="pillSec">00</em></div>
+        <div class="pill-date" id="pillDate"></div>
+      </div>
+      <div class="pill-rate">
+        <span class="pr-up" id="pillUp">↑ --</span>
+        <span class="pr-down" id="pillDown">↓ --</span>
+      </div>
+      <div class="pill-today">
+        <span class="pt-line" id="pillTodayUp">↑ --</span>
+        <span class="pt-line" id="pillTodayDown">↓ --</span>
+      </div>
+    </div>
+
+    <main id="widget">
+      <!-- 头部 -->
+      <header class="card hero">
+        <div class="hero-top drag">
+          <div class="time-block">
+            <div class="clock"><span id="clockHM">--:--</span><em class="clk-sec" id="clockSec">00</em></div>
+            <div class="date-line" id="dateLine">正在加载…</div>
+            <div class="src-line" id="srcLine">下载器流量统计 · 累计计数器差分</div>
+          </div>
+          <div class="status-block">
+            <div class="health" id="healthPill"><span class="dot"></span><span id="healthTxt">连接中</span></div>
+            <div class="today-live">
+              <span class="tl-up" id="heroUp">↑ --</span>
+              <span class="tl-down" id="heroDown">↓ --</span>
+            </div>
+          </div>
+        </div>
+        <!-- 窗口按钮：必须放在拖拽区之后 -->
+        <div class="win-actions no-drag">
+          <button class="icon-btn" id="btnRefresh" title="立即刷新"><span data-ui="refresh"></span></button>
+          <button class="icon-btn" id="btnPin" title="窗口置顶"><span data-ui="pin"></span></button>
+          <button class="icon-btn" id="btnSettings" title="设置"><span data-ui="sliders"></span></button>
+          <button class="icon-btn" id="btnClose" title="隐藏到托盘"><span data-ui="close"></span></button>
+        </div>
+      </header>
+
+      <!-- 1) 四周期汇总卡片 -->
+      <section class="summary-grid" id="summaryCards"></section>
+
+      <!-- 2) 下载器状态列表 -->
+      <section class="card dl-panel">
+        <div class="card-title">下载器 <em class="sub" id="lastUpdate"></em></div>
+        <div class="dl-strip" id="dlStrip"></div>
+      </section>
+
+      <!-- 3) 实时速率 -->
+      <section class="card rate-panel">
+        <div class="card-title">
+          实时速率
+          <em class="sub" id="ratePanRange"></em>
+          <span class="title-actions">
+            <button class="pill-btn sm" id="rateLatest" hidden>⟲ 回到最新</button>
+          </span>
+        </div>
+        <div class="chart-controls">
+          <div class="dropdown" id="rateRangeWrap">
+            <button class="dd-trigger" id="rateRangeTrigger"></button>
+            <div class="dd-menu" id="rateRangeMenu" hidden></div>
+          </div>
+          <div class="dropdown" id="rateDirWrap">
+            <button class="dd-trigger" id="rateDirTrigger"></button>
+            <div class="dd-menu" id="rateDirMenu" hidden></div>
+          </div>
+        </div>
+        <div class="chart-viewport">
+          <div id="rateChart" class="chart chart-lg"></div>
+          <div id="rateAxis" class="chart-axis chart-lg" aria-hidden="true"></div>
+        </div>
+        <div class="legend" id="rateLegend"></div>
+      </section>
+
+      <!-- 4) 流量统计 -->
+      <section class="card traffic-panel">
+        <div class="card-title">
+          流量统计
+          <em class="sub" id="trafficPanRange"></em>
+          <span class="title-actions">
+            <button class="pill-btn sm" id="trafficLatest" hidden>⟲ 回到最新</button>
+          </span>
+        </div>
+        <div class="chart-controls">
+          <div class="dropdown" id="trafficRangeWrap">
+            <button class="dd-trigger" id="trafficRangeTrigger"></button>
+            <div class="dd-menu" id="trafficRangeMenu" hidden></div>
+          </div>
+          <div class="dropdown" id="trafficDirWrap">
+            <button class="dd-trigger" id="trafficDirTrigger"></button>
+            <div class="dd-menu" id="trafficDirMenu" hidden></div>
+          </div>
+        </div>
+        <div class="stats-summary" id="trafficSummary"></div>
+        <div class="chart-viewport">
+          <div id="trafficChart" class="chart chart-lg"></div>
+          <div id="trafficAxis" class="chart-axis chart-lg" aria-hidden="true"></div>
+        </div>
+        <div class="legend" id="trafficLegend"></div>
+      </section>
+
+      <footer class="foot" id="footText">数据仅存本机 · 累计计数器差分统计</footer>
+    </main>
+  </div>
+
+  <!-- 设置面板 -->
+  <div id="settingsPanel" class="panel">
+    <div class="panel-head">
+      <span>设置</span>
+      <button class="icon-btn sm" id="closeSettings"><span data-ui="close"></span></button>
+    </div>
+    <div class="panel-body">
+      <nav class="settings-nav" id="settingsNav">
+        <button class="st-nav active" data-page="downloaders">下载器</button>
+        <button class="st-nav" data-page="collect">采集</button>
+        <button class="st-nav" data-page="window">窗口</button>
+        <button class="st-nav" data-page="about">关于</button>
+      </nav>
+      <div class="settings-pages">
+        <!-- 下载器 -->
+        <section class="st-page" data-page="downloaders">
+          <div class="cfg-tools">
+            <button class="pill-btn sm" id="btnRecolor">🎨 重新配色</button>
+            <span class="hint" id="demoHint"></span>
+          </div>
+          <div id="dlConfigList" class="dl-config-list"></div>
+          <h4 id="formTitle">添加下载器</h4>
+          <form id="dlForm" class="form-grid">
+            <input type="hidden" id="fId" />
+            <label>名称<input id="fName" placeholder="例如 qb1(下载)" maxlength="60" /></label>
+            <label>类型<select id="fType"><option value="qb">qBittorrent</option><option value="tr">Transmission</option></select></label>
+            <label class="span2">WebUI / RPC 地址<input id="fUrl" placeholder="http://192.168.1.11:8080" /></label>
+            <label>用户名<input id="fUser" placeholder="admin（TR 可留空）" maxlength="120" /></label>
+            <label>密码<input id="fPass" type="password" placeholder="新增时填写；编辑留空表示不改" maxlength="200" /></label>
+            <label class="check"><input type="checkbox" id="fEnabled" checked /> 启用采集</label>
+            <div class="form-actions span2">
+              <button type="button" class="pill-btn sm" id="btnTest">测试连接</button>
+              <button type="button" class="pill-btn sm ghost" id="btnResetForm">清空</button>
+              <button type="submit" class="pill-btn sm primary">保存</button>
+              <span class="hint" id="formMsg"></span>
+            </div>
+          </form>
+        </section>
+        <!-- 采集 -->
+        <section class="st-page" data-page="collect" hidden>
+          <h4>实时速率 · 采样间隔</h4>
+          <p class="hint">多久向每个下载器取一次速率。越短越细腻，请求越频繁。</p>
+          <div class="opt-row" id="pollOptions"></div>
+          <h4>流量统计 · 采样间隔</h4>
+          <p class="hint">按此间隔读取累计计数器差值写入小时桶。总量按差分计算，改间隔不丢量。</p>
+          <div class="opt-row" id="trafficPollOptions"></div>
+          <h4>「实时」窗口范围</h4>
+          <div class="opt-row" id="liveOptions"></div>
+          <div class="form-actions">
+            <button type="button" class="pill-btn sm primary" id="btnSaveCollect">保存设置</button>
+            <span class="hint" id="collectMsg"></span>
+          </div>
+          <p class="hint" id="collectCurrent"></p>
+        </section>
+        <!-- 窗口 -->
+        <section class="st-page" data-page="window" hidden>
+          <label class="check"><input type="checkbox" id="chkTop" /> 窗口置顶显示</label>
+          <label class="check"><input type="checkbox" id="chkAuto" /> 开机自动启动</label>
+          <label class="check"><input type="checkbox" id="chkEdgeDock" /> 顶部吸附（拖到顶端收起为小窗，悬停展开）</label>
+          <label class="check"><input type="checkbox" id="chkTrayInfo" /> 托盘显示实时速率</label>
+          <h4>动效</h4>
+          <select id="motionSelect" class="select">
+            <option value="on">开启（推荐）</option>
+            <option value="off">关闭（全部静止）</option>
+          </select>
+          <h4>快捷键</h4>
+          <p class="hint">Esc 关设置 · F5 刷新 · Ctrl+, 开设置 · Alt+←/→ 切换图表时间范围</p>
+        </section>
+        <!-- 关于 -->
+        <section class="st-page" data-page="about" hidden>
+          <div class="about">
+            <div class="about-name">流量台 <em id="panelVersion"></em></div>
+            <div class="about-author">宫崎骏风格桌面挂件 · Electron 版</div>
+            <p class="hint">移植自 ystykxc/torrent-traffic-monitor 的流量统计核心：只用下载器累计计数器差分统计上传/下载，不用「速率 × 时间」估算，日/周/月/年报表完全对账。数据保存在本机。</p>
+            <button type="button" class="pill-btn sm" id="btnRefreshData">立即刷新数据</button>
+          </div>
+        </section>
+      </div>
+      <button class="wide-btn danger" id="btnQuit">退出程序</button>
+    </div>
+  </div>
+
+  <!-- 详情弹窗 -->
+  <div id="detailModal" class="modal-mask" hidden>
+    <div class="modal">
+      <div class="modal-head"><span id="detailTitle">详情</span><button class="icon-btn sm" id="closeDetail"><span data-ui="close"></span></button></div>
+      <div class="modal-body" id="detailBody"></div>
+    </div>
+  </div>
+
+  <div id="tooltip" class="tooltip" hidden></div>
+
+  <script src="charts.js"></script>
+  <script src="icons.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

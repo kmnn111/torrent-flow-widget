@@ -1,0 +1,67 @@
+{
+  "name": "torrent-flow-widget",
+  "productName": "流量台",
+  "version": "1.0.0",
+  "description": "宫崎骏风格 Windows 桌面流量监控挂件：qBittorrent / Transmission 累计计数器差分统计，日/周/月/年对账，玻璃拟态 UI + 吸顶小窗 + 托盘",
+  "main": "main.js",
+  "author": "大软子哥哥",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis",
+    "pack": "electron-builder --win dir",
+    "release:prepare": "node scripts/prepare-release.js",
+    "release": "npm run dist && node scripts/prepare-release.js"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.11",
+    "koffi": "^3.3.6"
+  },
+  "build": {
+    "appId": "com.torrentflow.widget",
+    "productName": "流量台",
+    "copyright": "Copyright © 2026 TorrentFlow Studio",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "core/**/*",
+      "renderer/**/*",
+      "assets/**/*",
+      "node_modules/**/*"
+    ],
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://github.com/kmnn111/torrent-flow-widget/releases/latest/download"
+      }
+    ],
+    "win": {
+      "icon": "assets/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "流量台",
+      "artifactName": "TorrentFlow-Setup-${version}.exe",
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true
+    }
+  }
+}
