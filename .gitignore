@@ -20,4 +20,5 @@ _shot_block.txt
 *.log
 Thumbs.db
 Desktop.ini
-.DS_Store
+.DS_Store.rel-*
+*.online-*
