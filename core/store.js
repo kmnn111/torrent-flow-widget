@@ -26,6 +26,8 @@ const PALETTE = [
 /** 站点单轮增量上限：整站一小时涨 1TB 以上必是异常（换库/重新校验/统计口径跳变）。
     超限按 0 记，但基线照常写回，下一轮即恢复正常。 */
 const MAX_SITE_STEP = Math.pow(1024, 4);
+/** 站点账本最多保留多少站（远超真实用户的站点数，纯属防爆保护） */
+const MAX_SITE_KEYS = 500;
 
 class Store {
   constructor(filePath) {
@@ -318,8 +320,27 @@ class Store {
       if (mm) mm.last_seen = ts;
     }
     this.data.site_last_ts = ts;
+    // 站点桶只增不减（年度报表要读历史），但站点数可能因换域名/临时站持续膨胀。
+    // 这里只做上限保护：超过 MAX_SITE_KEYS 个站时，淘汰「最近 90 天无流量」的站，
+    // 仍超则按最后活跃时间砍最旧的 —— 正常用户几十年也碰不到这条线。
+    this._trimSiteKeys();
     if (changed) this.touch();
     return { changed, events };
+  }
+
+  _trimSiteKeys() {
+    const keys = Object.keys(this.data.site_meta);
+    if (keys.length <= MAX_SITE_KEYS) return;
+    const now = Math.floor(Date.now() / 1000);
+    const stale = keys.filter(k => !(this.data.site_meta[k].last_seen > now - 90 * 86400));
+    const victims = (stale.length ? stale : keys.sort((a, b) =>
+      (this.data.site_meta[a].last_seen || 0) - (this.data.site_meta[b].last_seen || 0)));
+    const dropCount = keys.length - MAX_SITE_KEYS;
+    for (const k of victims.slice(0, dropCount)) {
+      delete this.data.site_meta[k];
+      delete this.data.site_base[k];
+      delete this.data.site_hourly[k];
+    }
   }
 
   /** 站点周期汇总：[{key,name,full,host,known,day,week,month,year,all,...}] */
