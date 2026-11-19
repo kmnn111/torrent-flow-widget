@@ -1,7 +1,7 @@
 {
   "name": "torrent-flow-widget",
   "productName": "流量台",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "宫崎骏风格 Windows 桌面流量监控挂件：qBittorrent / Transmission 累计计数器差分统计，日/周/月/年对账，玻璃拟态 UI + 吸顶小窗 + 托盘",
   "main": "main.js",
   "author": "大软子哥哥",
@@ -49,7 +49,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },

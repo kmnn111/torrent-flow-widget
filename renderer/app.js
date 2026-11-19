@@ -1038,7 +1038,7 @@
     const off = state.settings.motion === 'off';
     document.documentElement.classList.toggle('motion-off', off);
     if (state.settings.alwaysOnTop) $('btnPin').style.color = 'var(--sun-deep)';
-    $('panelVersion').textContent = 'v' + ((window.flow.version && window.flow.version()) || '1.0.3');
+    $('panelVersion').textContent = 'v' + ((window.flow.version && window.flow.version()) || '1.0.4');
     tickClock();
     if (!window.__clockTimer) window.__clockTimer = setInterval(tickClock, 1000);
     // 回到前台立刻补一次刷新，避免隐藏期间暂停刷新导致数据看起来是旧的
