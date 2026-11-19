@@ -404,6 +404,132 @@
     }
   });
 
+  /* ================= 软件更新（OTA） =================
+     主进程侧（main.js）已把整条链路做完：检查 → 发现新版本 → 下载 → 重启安装。
+     渲染层只负责把 update:state 翻译成人话，并提供入口按钮 —— 缺了这层，
+     后端能力再完整用户也点不到，等于没有。 */
+  let manualCheck = false;      // 是否手动点了「检查更新」：决定 up-to-date/error 要不要显示状态
+  let lastUpdateState = null;   // 最近一次状态：横幅主按钮和设置页按钮都按它决定动作
+
+  function setUpdateStatus(t) { const el = $('updateStatus'); if (el) el.textContent = t; }
+  // 横幅显隐一律走 .show 类：hidden 属性会被 .update-banner 的 display:flex 覆盖，改了也没反应
+  function hideUpdateBanner() { const b = $('updateBanner'); if (b) b.classList.remove('show'); }
+  // 「稍后」按 版本+状态 记忆到 localStorage：同一版本的同一提醒只弹一次，跨启动、跨后台检查都不复发
+  function dismissedKey(type, ver) { return 'updDismiss_' + type + '_' + ver; }
+  function dismissUpdateBanner() {
+    const s = lastUpdateState || {};
+    if ((s.type === 'available' || s.type === 'downloaded') && s.version) {
+      try { localStorage.setItem(dismissedKey(s.type, s.version), '1'); } catch (e) { }
+    }
+    hideUpdateBanner();
+  }
+  function showUpdateBanner(html, primaryLabel, showPrimary) {
+    const b = $('updateBanner'); if (!b) return;
+    $('ubText').innerHTML = html;
+    const p = $('ubPrimary');
+    if (p) {
+      p.hidden = !showPrimary;
+      if (showPrimary) { p.textContent = primaryLabel; p.disabled = false; }
+    }
+    b.classList.add('show');
+  }
+  // 受「稍后」记忆约束的提示：该提醒过就收掉横幅，没记过才弹。
+  // 必须显式 hide —— 否则上一个状态（比如「正在下载 42%」）的横幅会一直挂在屏幕上，
+  // 主按钮又被本状态藏掉，看起来就是一个永远不会前进的假进度条。
+  function maybeBanner(type, ver, html, primaryLabel) {
+    if (ver && localStorage.getItem(dismissedKey(type, ver))) hideUpdateBanner();
+    else showUpdateBanner(html, primaryLabel, true);
+  }
+  // 设置页的动作按钮：发现新版本 → 「立即更新」；下载完成 → 「立即重启」；其余隐藏
+  function setDoUpdate(label) {
+    const b = $('btnDoUpdate'); if (!b) return;
+    if (label) { b.hidden = false; b.textContent = label; b.disabled = false; }
+    else b.hidden = true;
+  }
+
+  function onUpdateState(s) {
+    if (!s || !s.type) return;
+    lastUpdateState = s;
+    const cur = s.current ? 'v' + esc(s.current) : '';
+    switch (s.type) {
+      case 'available':
+        manualCheck = false;
+        setUpdateStatus(`发现新版本 v${esc(s.version)}`);
+        setDoUpdate('立即更新');
+        maybeBanner('available', s.version,
+          `发现新版本 <span class="nb"><b>v${esc(s.version)}</b>（当前 ${cur}）</span>`, '立即更新');
+        break;
+      case 'downloading': {
+        const pct = s.percent || 0;
+        const b = $('updateBanner');
+        if (b) b.classList.add('show');
+        const t = $('ubText'); if (t) t.innerHTML = `正在下载更新… <b>${pct}%</b>`;
+        const p = $('ubPrimary'); if (p) p.hidden = true;
+        setUpdateStatus(`正在下载 ${pct}%`);
+        setDoUpdate(null);
+        break;
+      }
+      case 'downloaded':
+        setUpdateStatus('更新已就绪，重启后安装');
+        setDoUpdate('立即重启');
+        maybeBanner('downloaded', s.version,
+          `<span class="nb">新版本 <b>v${esc(s.version)}</b></span> 已就绪，<span class="nb">重启后完成安装</span>`, '立即重启');
+        break;
+      case 'up-to-date':
+        if (manualCheck) setUpdateStatus(`已是最新版本（${cur}）`);
+        manualCheck = false; setDoUpdate(null); hideUpdateBanner();
+        break;
+      case 'unconfigured':
+        if (manualCheck) setUpdateStatus('未配置更新服务器地址');
+        manualCheck = false; setDoUpdate(null);
+        break;
+      case 'error':
+        if (manualCheck) setUpdateStatus('检查失败：' + esc(s.message || '未知错误'));
+        manualCheck = false; setDoUpdate(null);
+        break;
+    }
+  }
+
+  function bindUpdate() {
+    const btnCheck = $('btnCheckUpdate');
+    if (btnCheck) btnCheck.addEventListener('click', () => {
+      manualCheck = true;
+      setUpdateStatus('正在检查更新…');
+      window.flow.updateCheck();
+    });
+    const btnSave = $('btnSaveUpdateUrl');
+    if (btnSave) btnSave.addEventListener('click', async () => {
+      const v = $('updateUrlInput').value.trim();
+      state.settings = await window.flow.updateSettings({ updateUrl: v });
+      // 主进程对地址做了白名单校验（https；http 仅限本机），非法值会被静默丢弃 —— 回填真实生效值
+      const saved = (state.settings && state.settings.updateUrl) || '';
+      $('updateUrlInput').value = saved;
+      setUpdateStatus(!v ? '已清除更新服务器地址' : (saved ? '更新服务器地址已保存' : '地址无效：必须是 https（本机可 http）'));
+    });
+    const ubPrimary = $('ubPrimary');
+    if (ubPrimary) ubPrimary.addEventListener('click', () => {
+      const s = lastUpdateState || {};
+      if (s.type === 'available') { ubPrimary.disabled = true; window.flow.updateDownload(); }
+      else if (s.type === 'downloaded') window.flow.updateInstall();
+    });
+    // 设置页按钮与横幅主按钮同逻辑；下载类动作点完立即禁用，防连点重复触发
+    const btnDo = $('btnDoUpdate');
+    if (btnDo) btnDo.addEventListener('click', () => {
+      const s = lastUpdateState || {};
+      if (s.type === 'available') { btnDo.disabled = true; window.flow.updateDownload(); }
+      else if (s.type === 'downloaded') window.flow.updateInstall();
+    });
+    const ubLater = $('ubLater');
+    if (ubLater) ubLater.addEventListener('click', dismissUpdateBanner);
+    // 订阅主进程状态推送，并把当前状态补一次（页面可能晚于后台检查加载完成）
+    if (window.flow.onUpdateState) window.flow.onUpdateState(onUpdateState);
+    if (window.flow.updateState) {
+      Promise.resolve(window.flow.updateState()).then(s => { if (s && s.type && s.type !== 'idle') onUpdateState(s); }).catch(() => { });
+    }
+    // 回填当前更新源地址
+    if ($('updateUrlInput')) $('updateUrlInput').value = (state.settings && state.settings.updateUrl) || '';
+  }
+
   /* ================= 设置面板逻辑 ================= */
   function bindSettings() {
     // 下载器配置列表
@@ -1038,7 +1164,12 @@
     const off = state.settings.motion === 'off';
     document.documentElement.classList.toggle('motion-off', off);
     if (state.settings.alwaysOnTop) $('btnPin').style.color = 'var(--sun-deep)';
-    $('panelVersion').textContent = 'v' + ((window.flow.version && window.flow.version()) || '1.0.4');
+    // flow.version() 走 ipcRenderer.invoke，返回的是 Promise —— 当同步值拼字符串会显示成
+    // "[object Promise]"。先给个占位，取到真实值再回填。
+    $('panelVersion').textContent = 'v…';
+    Promise.resolve(window.flow.version && window.flow.version())
+      .then(v => { if (v) $('panelVersion').textContent = 'v' + v; })
+      .catch(() => { $('panelVersion').textContent = 'v' + (state.settings.version || ''); });
     tickClock();
     if (!window.__clockTimer) window.__clockTimer = setInterval(tickClock, 1000);
     // 回到前台立刻补一次刷新，避免隐藏期间暂停刷新导致数据看起来是旧的
@@ -1046,6 +1177,7 @@
       if (!document.hidden) refreshAll(false);
     });
     bindSettings();
+    bindUpdate();
     initSmoothScroll($('widget'));
     initSmoothScroll(document.querySelector('.panel-body'));
     initDragScrollY($('widget'));

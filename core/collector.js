@@ -34,7 +34,12 @@ class Collector {
     this.sitesError = '';
     this.activeTorrents = [];
     this.activeTs = 0;
-    this._trackerCache = new Map(); // hash → tracker 列表（空 tracker 种子的反查缓存）
+    // hash → tracker 列表（空 tracker 种子的反查缓存）。
+    // 只有「查到过」的结果才落盘：查不到（空数组）下次启动应该重试，
+    // 否则一次临时网络故障会让那个种子永久停在「无站点」。
+    this._trackerCache = new Map();
+    const warm = store && typeof store.getTrackerCache === 'function' ? store.getTrackerCache() : null;
+    if (warm) for (const h in warm) this._trackerCache.set(h, warm[h]);
     this._backfillBusy = false;
     this.lastTick = 0;
     this.lastError = '';
@@ -174,6 +179,7 @@ class Collector {
       const dls = this.store.listDownloaders().filter(d => d.enabled && !d.demo);
       const ts = Math.floor(Date.now() / 1000);
       const perSite = {};
+      const torrentRows = [];
       const active = [];
       const cfg = Number(this.store.getSettings().request_timeout) || 5;
 
@@ -235,6 +241,11 @@ class Collector {
           s.up += t.uploaded || 0;
           s.dl += t.downloaded || 0;
           s.count++;
+          // 种子级明细：记账的可靠依据。
+          // 站点聚合值会因「种子归属抖动」而涨落（冷启动时无 tracker 的种子归
+          // 无站点，后台反查后又跳回真实站），拿聚合值差分会把旧流量重记一遍。
+          // 单个种子的 uploaded/downloaded 才是单调的，所以按 hash 上报。
+          if (t.hash) torrentRows.push({ hash: t.hash, site: key, up: t.uploaded || 0, dl: t.downloaded || 0 });
           if (t.state === 'downloading' && t.progress < 1) {
             active.push({
               id: d.id, dl_name: d.name, hash: t.hash, name: t.name,
@@ -246,7 +257,21 @@ class Collector {
         }
       }
 
-      if (dls.length) this.store.recordSiteTraffic(ts, perSite);
+      if (dls.length) {
+        // 记账走种子级（单调安全）；perSite 只用于写站点元信息与兜底。
+        // 只要本轮拿到了种子明细，就不再走聚合差分 —— 否则两套口径会各记一遍。
+        if (torrentRows.length) {
+          const siteInfo = {};
+          for (const k in perSite) {
+            const s = perSite[k];
+            siteInfo[k] = { name: s.name, full: s.full, host: s.host, known: s.known };
+          }
+          this.store.recordSiteTrafficByTorrent(ts, torrentRows, siteInfo);
+        } else {
+          // 极端兜底：客户端没给 hash（理论上不会发生），退回旧的聚合差分
+          this.store.recordSiteTraffic(ts, perSite);
+        }
+      }
 
       // 正在下载：速率高的排前面，同速率按进度降序（快下完的优先看到）
       active.sort((a, b) => (b.dl_rate - a.dl_rate) || (b.progress - a.progress));
@@ -284,6 +309,15 @@ class Collector {
       }
       // 补到什么程度就立刻用上，不必等下一轮整点
       this.onEvent('sites');
+      // 落盘：下次启动直接有缓存，第一轮就能把种子认到正确站点。
+      // 否则每次重启都要重走「先归无站点、再跳回真实站」的抖动 ——
+      // 虽然记账已改成按种子 hash（抖动不再产生假流量），但界面上的
+      // 站点列表会先闪一下「无站点」再跳成真名，观感不好。
+      const dump = {};
+      for (const [h, trs] of this._trackerCache) {
+        if (Array.isArray(trs) && trs.length) dump[h] = trs;
+      }
+      if (this.store && typeof this.store.setTrackerCache === 'function') this.store.setTrackerCache(dump);
     } finally {
       this._backfillBusy = false;
     }

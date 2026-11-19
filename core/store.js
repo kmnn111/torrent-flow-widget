@@ -28,6 +28,10 @@ const PALETTE = [
 const MAX_SITE_STEP = Math.pow(1024, 4);
 /** 站点账本最多保留多少站（远超真实用户的站点数，纯属防爆保护） */
 const MAX_SITE_KEYS = 500;
+/** 种子级基线表上限。320 个种子 ≈ 40KB，两万条足够长期运行且不会撑大 JSON */
+const MAX_TORRENT_BASE = 20000;
+/** 无 tracker 种子的专用站点键（与「未知站点」严格区分，见 collector.js） */
+const NO_SITE_KEY = 'no-site';
 
 class Store {
   constructor(filePath) {
@@ -43,10 +47,13 @@ class Store {
       settings: { poll_interval: 5, traffic_interval: 60, live_span: 300, tz_offset: 8, request_timeout: 5 },
       state: {}, hourly: {}, samples: [], traffic_samples: [], nextId: 1,
       // PT 站流量账本：
-      //   site_base: { [siteKey]: { [dlId]: { up, dl } } }  ← 每个种子累计值的基线（差分用）
+      //   torrent_base: { [hash]: {up, dl, site, ts} }  ← 种子级基线（v1.0.5 起的记账依据）
+      //   site_base: { [siteKey]: {up, dl} }             ← 站点聚合基线（旧口径，仅兼容保留）
       //   site_hourly: { [siteKey]: { [hourTs]: {day,week,month,year,dl_bytes,up_bytes} } }
       //   site_meta: { [siteKey]: {name, full, host, known, last_seen} }   ← 昵称与最近活跃
-      site_base: {}, site_hourly: {}, site_meta: {},
+      torrent_base: {}, site_base: {}, site_hourly: {}, site_meta: {},
+      // tracker 反查缓存（hash → {trs, ts}），跨启动复用，减少归属抖动
+      tracker_cache: {},
       // 演示数据功能已彻底移除。保留 demoOptedOut 仅为兼容旧数据读取，不再参与任何逻辑。
       demoOptedOut: false
     };
@@ -68,6 +75,8 @@ class Store {
       this.data.samples = Array.isArray(parsed.samples) ? parsed.samples : [];
       this.data.traffic_samples = Array.isArray(parsed.traffic_samples) ? parsed.traffic_samples : [];
       this.data.site_base = (parsed.site_base && typeof parsed.site_base === 'object' && !Array.isArray(parsed.site_base)) ? parsed.site_base : {};
+      this.data.torrent_base = (parsed.torrent_base && typeof parsed.torrent_base === 'object' && !Array.isArray(parsed.torrent_base)) ? parsed.torrent_base : {};
+      this.data.tracker_cache = (parsed.tracker_cache && typeof parsed.tracker_cache === 'object' && !Array.isArray(parsed.tracker_cache)) ? parsed.tracker_cache : {};
       this.data.site_hourly = (parsed.site_hourly && typeof parsed.site_hourly === 'object' && !Array.isArray(parsed.site_hourly)) ? parsed.site_hourly : {};
       this.data.site_meta = (parsed.site_meta && typeof parsed.site_meta === 'object' && !Array.isArray(parsed.site_meta)) ? parsed.site_meta : {};
       this.data.nextId = Number(parsed.nextId) || 1;
@@ -280,6 +289,38 @@ class Store {
      每轮抓取每站所有种子的累计值，与上一轮基线的差值就是这段时间的新增流量，
      再按 recordTraffic 同样的方式摊到小时桶。 */
 
+  /* ---------- tracker 反查缓存（跨启动复用） ----------
+     只存「查到过」的 hash。目的：减少重启后种子归属从「无站点」跳回真实站的抖动，
+     让第一轮采集就能把站点认对。条目带 ts，超过 14 天自动淘汰（换 tracker 的种子
+     会自然更新；长期不活跃的种子没必要一直占着）。 */
+  getTrackerCache() {
+    const c = this.data.tracker_cache;
+    if (!c || typeof c !== 'object') return null;
+    const cutoff = Math.floor(Date.now() / 1000) - 14 * 86400;
+    const out = {};
+    let any = false;
+    for (const h in c) {
+      const e = c[h];
+      if (!e || !Array.isArray(e.trs) || !e.trs.length) continue;
+      if ((e.ts || 0) < cutoff) continue;
+      out[h] = e.trs;
+      any = true;
+    }
+    return any ? out : null;
+  }
+  setTrackerCache(map) {
+    const now = Math.floor(Date.now() / 1000);
+    const prev = this.data.tracker_cache || {};
+    const next = {};
+    for (const h in map) {
+      const trs = map[h];
+      if (!Array.isArray(trs) || !trs.length) continue;
+      next[h] = { trs, ts: (prev[h] && prev[h].ts) || now };
+    }
+    this.data.tracker_cache = next;
+    this.touch();
+  }
+
   /** 站点元信息（昵称等）落盘，供 UI 直接读，不必重新解析 tracker */
   _siteMeta(key, info) {
     const m = this.data.site_meta[key];
@@ -296,6 +337,16 @@ class Store {
 
   /**
    * 用「每站种子的累计上传/下载合计」做差分，写入站点小时桶。
+   *
+   * ⚠️ 已知缺陷（v1.0.5 起由 recordSiteTrafficByTorrent 取代）：
+   * 站点聚合值不是单调递增的 —— 种子的 tracker 字段会抖动（彩虹岛在
+   * chdbits.xyz / tracker.ptchdbits.co / tracker.rainbowisland.co 间来回切换），
+   * 冷启动时 _trackerCache 为空，无 tracker 的种子先归「无站点」，
+   * 后台反查补齐后又跳回真实站。聚合值随之涨落，差分就把「跳回来的旧流量」
+   * 当成新增量重复记账。实测：冷→热一次切换凭空产生 1006GB 假增量，
+   * 表现就是「天空今日下载 1.2TB」而该站累计才 695GB。
+   * 保留此方法仅供测试与向后兼容；生产路径改用按种子记账。
+   *
    * @param {number} ts 本轮时间戳（秒）
    * @param {Object} perSite { [siteKey]: { up, dl, name, full, host, known } }
    * @returns {{changed:boolean, events:Object}}
@@ -382,6 +433,126 @@ class Store {
       delete this.data.site_meta[k];
       delete this.data.site_base[k];
       delete this.data.site_hourly[k];
+    }
+  }
+
+  /**
+   * 按「单个种子」记账（v1.0.5 起的正确做法）。
+   *
+   * 为什么不能用站点聚合值差分：聚合值 = 该站所有种子累计值之和，它随
+   * 「本轮哪些种子被认成这个站」而变，不是单调函数。
+   *   · 冷启动时 _trackerCache 为空 → 无 tracker 的种子先归「无站点」
+   *   · 后台反查补齐后 → 同一批种子跳回真实站
+   * 聚合值于是「先跌后涨」，差分把涨的那段当成新流量再记一遍。
+   * 实测一次冷→热切换就凭空多记 1006GB，正是「天空今日 1.2TB」的来源。
+   *
+   * 单个种子的 uploaded/downloaded 只增不减（除非重新校验），差分天然安全：
+   * 归属变了也无所谓，我们记的是「这个 hash 涨了多少」，归属只决定记到哪个站。
+   *
+   * @param {number} ts 本轮时间戳（秒）
+   * @param {Array<{hash,site,up,dl}>} rows 本轮全部种子及其真实归属
+   * @param {Object} siteInfo { [siteKey]: {name,full,host,known} } 仅用于写元信息
+   * @returns {{changed:boolean, recorded:number}}
+   */
+  recordSiteTrafficByTorrent(ts, rows, siteInfo) {
+    if (!Array.isArray(rows) || !rows.length) return { changed: false, recorded: 0 };
+    // 时间分摊：与旧方法同口径，跨整点时按秒数比例拆到各小时桶
+    const prevTs = this.data.site_last_ts || 0;
+    const span = prevTs ? Math.min(3600, Math.max(1, ts - prevTs)) : 0;
+    const segments = [];
+    if (span > 0) {
+      let cur = ts - span;
+      while (cur < ts) {
+        const h = tu.hourFloor(cur);
+        const segEnd = Math.min(ts, h + 3600);
+        segments.push([h, segEnd - cur]);
+        cur = segEnd;
+      }
+    } else {
+      segments.push([tu.hourFloor(ts), 1]);
+    }
+
+    const baselines = this.data.torrent_base || (this.data.torrent_base = {});
+    // 本轮每个站的增量累加，最后一次性写桶，避免逐种子反复改对象
+    const siteInc = {};
+    let recorded = 0;
+
+    for (const r of rows) {
+      const hash = String(r.hash || '');
+      if (!hash) continue;
+      const key = r.site || NO_SITE_KEY;
+      const upNow = Number(r.up) || 0, dlNow = Number(r.dl) || 0;
+      const b = baselines[hash];
+      if (!b) {
+        // 首次见到这个种子：只建基线不记账。
+        // 它的 downloaded 可能已经是几十 GB 的历史累计，记进来就是一次假流量。
+        baselines[hash] = { up: upNow, dl: dlNow, site: key, ts };
+        continue;
+      }
+      let du = upNow - (Number(b.up) || 0);
+      let dd = dlNow - (Number(b.dl) || 0);
+      // 负值 = 重新校验 / 换文件 / 计数器归零：按 0 计并重建基线
+      if (!(du > 0)) du = 0;
+      if (!(dd > 0)) dd = 0;
+      // 单种子单轮上限：一个种子一小时涨超 1TB 必是异常
+      if (du >= MAX_SITE_STEP) du = 0;
+      if (dd >= MAX_SITE_STEP) dd = 0;
+      if (du || dd) {
+        const s = siteInc[key] || (siteInc[key] = { up: 0, dl: 0 });
+        s.up += du; s.dl += dd;
+        recorded++;
+      }
+      // 归属变化时更新记录里的站（不影响已记的账，只影响下一轮记到哪）
+      b.up = upNow; b.dl = dlNow; b.site = key; b.ts = ts;
+    }
+
+    let changed = false;
+    for (const key in siteInc) {
+      const inc = siteInc[key];
+      if (!inc.up && !inc.dl) continue;
+      if (!this.data.site_hourly[key]) this.data.site_hourly[key] = {};
+      const buckets = this.data.site_hourly[key];
+      for (const [h, w] of segments) {
+        const meta = tu.hourMeta(h);
+        const k = String(h);
+        const bk = buckets[k] || (buckets[k] = { day: meta.day, week: meta.week, month: meta.month, year: meta.year, dl_bytes: 0, up_bytes: 0 });
+        const s = span > 0 ? (w / span) : 1;
+        bk.dl_bytes += Math.round(inc.dl * s);
+        bk.up_bytes += Math.round(inc.up * s);
+      }
+      changed = true;
+    }
+
+    // 站点元信息与活跃时间
+    if (siteInfo) {
+      for (const key in siteInfo) {
+        if (!key || !String(key).trim()) continue;
+        this._siteMeta(key, siteInfo[key]);
+        const mm = this.data.site_meta[key];
+        if (mm) mm.last_seen = ts;
+      }
+    }
+    this.data.site_last_ts = ts;
+    this._trimTorrentBase(ts);
+    if (changed) this.touch();
+    return { changed, recorded };
+  }
+
+  /** 种子基线表清理：默认保留 30 天没出现过的 hash（防止换种频繁的用户表无限膨胀） */
+  _trimTorrentBase(now) {
+    const base = this.data.torrent_base;
+    if (!base) return;
+    const keys = Object.keys(base);
+    if (keys.length <= MAX_TORRENT_BASE) return;
+    const cutoff = (now || Math.floor(Date.now() / 1000)) - 30 * 86400;
+    for (const h of keys) {
+      if ((base[h].ts || 0) < cutoff) delete base[h];
+    }
+    // 仍然超限就按最久未见淘汰
+    const rest = Object.keys(base);
+    if (rest.length > MAX_TORRENT_BASE) {
+      rest.sort((a, b) => (base[a].ts || 0) - (base[b].ts || 0));
+      for (const h of rest.slice(0, rest.length - MAX_TORRENT_BASE)) delete base[h];
     }
   }
 

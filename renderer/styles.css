@@ -370,6 +370,61 @@ body.docked:not(.expanded) .clouds {
 .about-name { font-size: 15px; font-weight: 700; }
 .about-author { font-size: 11px; color: var(--ink-soft); margin-top: 3px; }
 
+/* ================= 软件更新（OTA） ================= */
+/* 设置页「关于」里的更新动作行：按钮 + 状态文字，状态文字吃掉剩余宽度以便长报错换行 */
+.update-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.update-row .update-status { flex: 1; min-width: 120px; font-size: 10.5px; color: var(--ink-soft); line-height: 1.5; word-break: break-word; }
+/* 更新源地址：输入框沿用 .form-grid input 的观感，但宽度由 flex 决定 */
+.update-url-row { display: flex; gap: 6px; margin-top: 8px; }
+.update-url-row input {
+  flex: 1; min-width: 0; font-family: inherit; font-size: 11px; padding: 6px 8px;
+  border: 1px solid rgba(123, 159, 196, .35); border-radius: 7px;
+  background: rgba(255, 255, 255, .5); color: var(--ink); outline: none;
+}
+.update-url-row input:focus { border-color: var(--accent); }
+.update-url-row .pill-btn { flex: none; }
+:root.night .update-url-row input { background: rgba(255, 255, 255, .06); }
+
+/* 更新提醒横幅
+   显隐只用 .show 类：hidden 属性会被这里的 display:flex 覆盖掉，那是条死路。
+   定位于 #widget 之外（fixed），因为 #widget 是滚动容器 —— 挂在里面会随内容滚走。
+   版式：文字在上、按钮排下方，文字再长也不会和按钮挤在一行。 */
+.update-banner {
+  position: fixed; top: 52px; left: 50%;
+  transform: translate(-50%, -12px);
+  width: max-content; max-width: calc(100% - 32px);
+  opacity: 0; visibility: hidden; pointer-events: none;
+  z-index: 45;                       /* 高于 #pill(40)、低于设置面板(50)，不遮挡设置操作 */
+  display: flex; flex-direction: column; align-items: stretch; gap: 9px;
+  padding: 12px 15px;
+  background: var(--paper-strong);
+  backdrop-filter: blur(24px) saturate(1.5);
+  -webkit-backdrop-filter: blur(24px) saturate(1.5);
+  border: 1px solid rgba(255, 255, 255, .6);
+  border-radius: 15px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .7), 0 12px 30px rgba(42, 32, 22, .2);
+  /* 只动 opacity/transform，走合成层；visibility 用 0s 延迟切换保证过渡能播完 */
+  transition: opacity .3s cubic-bezier(.32,.72,.28,1), transform .3s cubic-bezier(.32,.72,.28,1), visibility 0s .3s;
+}
+.update-banner.show {
+  opacity: 1; visibility: visible; pointer-events: auto;
+  transform: translate(-50%, 0);
+  transition: opacity .3s cubic-bezier(.32,.72,.28,1), transform .3s cubic-bezier(.32,.72,.28,1), visibility 0s;
+}
+:root.night .update-banner {
+  background: var(--paper-strong);
+  border-color: rgba(200, 220, 255, .22);
+  box-shadow: inset 0 1px 0 rgba(210, 225, 250, .1), 0 12px 30px rgba(0, 0, 0, .5);
+}
+.update-banner .ub-text { font-size: 12px; color: var(--ink); line-height: 1.55; min-width: 0; }
+.update-banner .ub-text b { color: var(--sun-deep); font-weight: 700; }
+.update-banner .ub-text .nb { white-space: nowrap; }   /* 版本号整体换行，不被拦腰截断 */
+:root.night .update-banner .ub-text b { color: var(--up); }
+.update-banner .ub-actions { display: flex; gap: 7px; justify-content: flex-end; }
+.update-banner .pill-btn[hidden] { display: none; }
+/* 吸顶收起态不画横幅：透明小窗外会露出一张悬空卡片 */
+body.docked:not(.expanded) .update-banner { display: none !important; }
+
 /* 详情弹窗 */
 .modal-mask { position: fixed; inset: 0; z-index: 60; background: rgba(20,16,12,.34); backdrop-filter: blur(3px); display: grid; place-items: center; }
 .modal { width: 88%; max-height: 82%; overflow: hidden; background: var(--paper-strong); border-radius: 18px; box-shadow: var(--shadow); display: flex; flex-direction: column; }

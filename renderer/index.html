@@ -34,6 +34,14 @@
     </div>
 
     <main id="widget">
+      <!-- 更新提醒横幅：显隐走 .show 类（hidden 属性会被 .update-banner 的 display 覆盖而失效） -->
+      <div id="updateBanner" class="update-banner">
+        <div class="ub-text" id="ubText"></div>
+        <div class="ub-actions">
+          <button type="button" class="pill-btn sm primary" id="ubPrimary" hidden>立即更新</button>
+          <button type="button" class="pill-btn sm ghost" id="ubLater">稍后</button>
+        </div>
+      </div>
       <!-- 头部 -->
       <header class="card hero">
         <div class="hero-top drag">
@@ -239,6 +247,18 @@
             <div class="about-author">宫崎骏风格桌面挂件 · Electron 版</div>
             <p class="hint">移植自 ystykxc/torrent-traffic-monitor 的流量统计核心：只用下载器累计计数器差分统计上传/下载，不用「速率 × 时间」估算，日/周/月/年报表完全对账。数据保存在本机。</p>
             <button type="button" class="pill-btn sm" id="btnRefreshData">立即刷新数据</button>
+
+            <h4>软件更新</h4>
+            <div class="update-row">
+              <button type="button" class="pill-btn sm" id="btnCheckUpdate">检查更新</button>
+              <button type="button" class="pill-btn sm primary" id="btnDoUpdate" hidden>立即更新</button>
+              <span class="update-status" id="updateStatus">—</span>
+            </div>
+            <div class="update-url-row">
+              <input id="updateUrlInput" placeholder="更新服务器地址（HTTP/HTTPS）" />
+              <button type="button" class="pill-btn sm" id="btnSaveUpdateUrl">保存</button>
+            </div>
+            <p class="hint" id="updateUrlHint"></p>
           </div>
         </section>
       </div>
