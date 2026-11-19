@@ -36,18 +36,26 @@ class Store {
     return {
       downloaders: [],
       settings: { poll_interval: 5, traffic_interval: 60, live_span: 300, tz_offset: 8, request_timeout: 5 },
-      state: {}, hourly: {}, samples: [], traffic_samples: [], nextId: 1
+      state: {}, hourly: {}, samples: [], traffic_samples: [], nextId: 1,
+      // 用户是否已明确接管配置。一旦用户增删过下载器就置 true，
+      // 之后即使删光也不会退回演示态（否则演示器会不断自动回注，表现为"删了又跳出来"）
+      demoOptedOut: false
     };
   }
   load() {
     try {
       if (!fs.existsSync(this.file)) return;
       const parsed = JSON.parse(fs.readFileSync(this.file, 'utf8'));
+      // 先铺默认值再合并解析结果。不能先 Object.assign(b, parsed) 再合 settings：
+      // 那会用 parsed.settings 覆盖 b.settings，后续就变成"自己合并自己"，
+      // 旧数据缺字段时 tz_offset / request_timeout 等默认值永远补不上。
       const b = this._blank();
       this.data = Object.assign(b, parsed);
-      this.data.settings = Object.assign(b.settings, parsed.settings || {});
-      this.data.state = parsed.state || {};
-      this.data.hourly = parsed.hourly || {};
+      this.data.settings = Object.assign(this._blank().settings, parsed.settings || {});
+      // 类型校验：JSON 合法但字段类型错（如 downloaders:null）会让首屏直接崩
+      this.data.downloaders = Array.isArray(parsed.downloaders) ? parsed.downloaders : [];
+      this.data.state = (parsed.state && typeof parsed.state === 'object' && !Array.isArray(parsed.state)) ? parsed.state : {};
+      this.data.hourly = (parsed.hourly && typeof parsed.hourly === 'object' && !Array.isArray(parsed.hourly)) ? parsed.hourly : {};
       this.data.samples = Array.isArray(parsed.samples) ? parsed.samples : [];
       this.data.traffic_samples = Array.isArray(parsed.traffic_samples) ? parsed.traffic_samples : [];
       this.data.nextId = Number(parsed.nextId) || 1;
@@ -103,6 +111,8 @@ class Store {
       row.color_down = row.color_down || p[1];
     }
     this.data.downloaders.push(row);
+    // 用户新增真实器 = 明确接管配置，从此不再自动回注演示数据
+    this.data.demoOptedOut = true;
     this.save();
     return row;
   }
@@ -122,8 +132,27 @@ class Store {
     if (i < 0) return false;
     this.data.downloaders.splice(i, 1);
     delete this.data.state[id]; delete this.data.hourly[id];
+    // 删除即视为接管配置：哪怕删光也保持"未配置"空态，绝不退回演示态
+    this.data.demoOptedOut = true;
     this.save();
     return true;
+  }
+  /**
+   * 主动恢复演示态（设置页"恢复演示数据"入口用）。
+   * 清掉真实器与其所有数据，复位接管标记，让 collector 下一轮重新注入演示器。
+   */
+  resetToDemo() {
+    const demoIds = new Set(this.data.downloaders.filter(d => d.demo).map(d => d.id));
+    this.data.downloaders = [];
+    for (const id of Object.keys(this.data.state)) {
+      if (!demoIds.has(Number(id))) delete this.data.state[id];
+    }
+    for (const id of Object.keys(this.data.hourly)) {
+      if (!demoIds.has(Number(id))) delete this.data.hourly[id];
+    }
+    this.data.demoOptedOut = false;
+    this.data.nextId = 1;
+    this.save();
   }
   reorderDownloaders(ids) {
     const map = new Map(ids.map((id, i) => [Number(id), i]));
@@ -194,14 +223,22 @@ class Store {
     }
     if (!this.data.hourly[id]) this.data.hourly[id] = {};
     const buckets = this.data.hourly[id];
+    // 首轮无时间基线时 span=0，此时整笔增量全落在当前桶（share=1）。
+    // 绝不能写 (w/span || 1)：span=0 时 w/span=Infinity 是 truthy，|| 兜底失效，
+    // 会把小时桶写成 Infinity/NaN，污染全部周期汇总与图表。
+    const safeDl = Number.isFinite(dlInc) && dlInc > 0 ? dlInc : 0;
+    const safeUp = Number.isFinite(upInc) && upInc > 0 ? upInc : 0;
     for (const [h, w] of segments) {
       const meta = tu.hourMeta(h);
       const key = String(h);
       const b = buckets[key] || (buckets[key] = { day: meta.day, week: meta.week, month: meta.month, year: meta.year, dl_bytes: 0, up_bytes: 0, samples: 0 });
-      b.dl_bytes += Math.round(dlInc * (w / span || 1));
-      b.up_bytes += Math.round(upInc * (w / span || 1));
+      const s = span > 0 ? (w / span) : 1;
+      b.dl_bytes += Math.round(safeDl * s);
+      b.up_bytes += Math.round(safeUp * s);
       b.samples += 1;
     }
+    // 写回时间基线：下一次差分才知道这次增量跨越了多长时间，才能正确分摊到小时桶
+    this.getState(id).last_ts = ts;
     this.touch();
   }
 

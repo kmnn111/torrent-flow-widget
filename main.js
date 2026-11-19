@@ -86,7 +86,7 @@ let dockTimer = null;
 let programmatic = 0;                 // 程序改 bounds 的时间戳，抑制吸附/位置记忆
 let hoverPoll = null;
 let hoverArmed = true;                // "离开再进入"才展开，避免刚放下小窗就弹开
-const DESIGN_W = 768, DESIGN_H = 940; // 窗口设计尺寸（固定，resizable:false）：横排四周期卡片 + 双图表
+const DESIGN_W = 560, DESIGN_H = 940; // 窗口设计尺寸（固定，resizable:false）：四周期卡片 + 双图表（竖长条桌面部件比例）
 let baseSize = { w: DESIGN_W, h: DESIGN_H }; // 基准尺寸 = 设计常量（落盘 winSize 只当回执，绝不当基准）
 
 const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
@@ -356,7 +356,8 @@ function registerIpc() {
 
   /* ================= 流量数据接口（替代原 HTTP API，走 IPC） ================= */
   ipcMain.handle('app:overview', () => store.overview());
-  ipcMain.handle('app:downloaders', () => store.listDownloaders());
+  // 设置页只列真实下载器：演示占位器不该出现在配置列表里让用户去删（删了也会立即回注）
+  ipcMain.handle('app:downloaders', () => store.listDownloaders().filter(d => !d.demo));
   ipcMain.handle('app:settings-get', () => store.getSettings());
   ipcMain.handle('app:periods', (_e, gran) => store.periodSeries(gran));
   ipcMain.handle('app:chart', (_e, p) => chartCore.build(store, p && p.range, p && p.metric, p && p.offset));
@@ -387,11 +388,27 @@ function registerIpc() {
     const s = sanitizeDl(patch); if (!s) return { error: '地址无效' };
     store.updateDownloader(id, s); if (collector) collector.restart(); return { ok: true };
   });
-  ipcMain.handle('dl:delete', (_e, id) => { store.deleteDownloader(id); if (collector) collector.restart(); return { ok: true }; });
+  ipcMain.handle('dl:delete', (_e, id) => {
+    const ok = store.deleteDownloader(id);
+    if (ok && collector) collector.restart();
+    return { ok };
+  });
+  ipcMain.handle('dl:reset-demo', () => {
+    store.resetToDemo();
+    if (collector) { collector._demoRateSeeded = false; collector.restart(); }
+    return { ok: true };
+  });
   ipcMain.handle('dl:reorder', (_e, ids) => { if (Array.isArray(ids)) store.reorderDownloaders(ids); return { ok: true }; });
   ipcMain.handle('dl:recolor', () => { store.recolor(); return { ok: true }; });
   ipcMain.handle('dl:test', async (_e, d) => {
-    const s = sanitizeDl(d); if (!s) return { ok: false, error: '地址无效' };
+    // 编辑态密码框按设计留空表示"不改"，此时用已存配置的密码测试，
+    // 否则对有密码的下载器测试必然误报"认证失败"
+    let merged = d;
+    if (d && d.id && !d.password) {
+      const saved = store.getDownloader(d.id);
+      if (saved) merged = Object.assign({}, saved, d, { password: saved.password });
+    }
+    const s = sanitizeDl(merged); if (!s) return { ok: false, error: '地址无效' };
     try {
       const cfg = Number(store.getSettings().request_timeout) || 5;
       const c = clients.makeClient(s, cfg * 1000);
@@ -556,6 +573,45 @@ function createWindow() {
     setTimeout(undoMinimize, 40);      // 系统最小化动画期间再兜一次（事件时序竞争）
     setTimeout(undoMinimize, 250);
   });
+  /* 窗口几何记忆 + 拖拽吸附触发（移植自天气台）。
+     此前缺这一段：拖到顶端不会触发 checkSnap，吸顶态拖离也不会解除，
+     窗口位置不落盘，系统擅改尺寸也纠不回来。 */
+  let saveTimer = null;
+  const saveGeom = () => {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      if (!win || win.isDestroyed()) return;
+      if (Date.now() - programmatic < 600) return;
+      // 最小化时 bounds 是 -32000 垃圾值：不能落盘（重启后窗飞出屏）
+      if (win.isMinimized()) return;
+      const b = win.getBounds();
+      // 系统（DPI 切换 / 吸附 / 休眠恢复）擅改尺寸 → 立即纠回，坏尺寸绝不落盘
+      if (b.width !== baseSize.w || b.height !== baseSize.h) {
+        setBoundsSafe({ x: b.x, y: b.y, width: baseSize.w, height: baseSize.h });
+        return;
+      }
+      if (settings.docked) {
+        // 吸顶态不覆盖 winPos，但小窗位置要跟上大窗平移，否则重启后小窗回到旧 dockX
+        const wa = screen.getDisplayMatching(b).workArea;
+        const px = clamp(Math.round(b.x + baseSize.w / 2 - PILL_W / 2), wa.x, wa.x + wa.width - PILL_W);
+        if (px !== settings.dockX) { settings.dockX = px; persist({ dockX: px }); }
+        return;
+      }
+      persist({ winPos: { x: b.x, y: b.y }, winSize: { w: baseSize.w, h: baseSize.h } });
+    }, 400);
+  };
+  // 固定尺寸窗口：任何交互/系统触发的 resize 都是异常，直接拒绝
+  win.on('will-resize', (e) => { if (Date.now() - programmatic >= 600) e.preventDefault(); });
+  win.on('move', saveGeom);
+  win.on('resize', saveGeom);
+  let snapTimer = null;
+  const scheduleSnap = () => {
+    clearTimeout(snapTimer);
+    snapTimer = setTimeout(checkSnap, 350);
+  };
+  win.on('move', scheduleSnap);
+  win.on('moved', scheduleSnap);
+
   win.on('closed', () => { stopHoverPoll(); setGlue(false); });
   // 隐藏到托盘时停掉 260ms 光标轮询，重新显示时再起（避免后台无效唤醒）
   win.on('hide', stopHoverPoll);
@@ -627,6 +683,18 @@ function createWindow() {
       await wait(700);
       await shoot('ui-1-main.png');
 
+      // hover 自检：在速率图中间触发一次 mousemove，验证悬停十字线 + 提示框
+      await W(`(() => {
+        const host = document.getElementById('rateChart').parentElement;
+        const r = host.getBoundingClientRect();
+        host.dispatchEvent(new MouseEvent('mousemove', {
+          bubbles: true, clientX: r.left + r.width * 0.55, clientY: r.top + r.height * 0.5
+        }));
+      })()`);
+      await wait(400);
+      await shoot('ui-10-hover.png');
+      await W(`document.getElementById('rateChart').parentElement.dispatchEvent(new MouseEvent('mouseleave', { bubbles: false }))`);
+
       // 滚到底部：流量统计图完整可见
       await W(`document.getElementById('widget').scrollTop = 99999`);
       await wait(700);
@@ -655,6 +723,17 @@ function createWindow() {
       await W(`document.getElementById('btnSettings').click()`);
       await wait(900);
       await shoot('ui-5-settings.png');
+
+      // 光标自检：聚焦地址框并选中一段文字，验证 caret / user-select 修复生效
+      await W(`(() => {
+        const el = document.getElementById('fUrl');
+        if (!el) return;
+        el.focus(); el.value = 'http://192.168.1.11:8080';
+        try { el.setSelectionRange(7, 16); } catch (e) {}
+      })()`);
+      await wait(300);
+      await shoot('ui-9-input-caret.png');
+      await W(`document.getElementById('fUrl').blur()`);
 
       // 设置-采集页
       await W(`document.querySelector('.st-nav[data-page="collect"]').click()`);

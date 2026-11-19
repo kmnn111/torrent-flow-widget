@@ -23,6 +23,8 @@ class Collector {
     this.lastError = '';
     this._demoBase = null;
     this._demoSeed = 7;
+    this.kickTimer = null;
+    this._demoRateSeeded = false;
   }
   start() {
     this.stop();
@@ -31,13 +33,19 @@ class Collector {
     const ti = clamp(Number(s.traffic_interval) || 60, 5, 1800) * 1000;
     this.rateTimer = setInterval(() => this.pollRate(), ri);
     this.trafficTimer = setInterval(() => this.pollTraffic(), ti);
-    setTimeout(() => { this.pollRate(); this.pollTraffic(); }, 400);
+    // 保存句柄：连续增删下载器会频繁 restart，未取消的一次性轮询会叠加、互相踩踏
+    if (this.kickTimer) clearTimeout(this.kickTimer);
+    this.kickTimer = setTimeout(() => {
+      this.kickTimer = null;
+      this.pollRate(); this.pollTraffic();
+    }, 400);
     this._pushInfo();
   }
   stop() {
     if (this.rateTimer) clearInterval(this.rateTimer);
     if (this.trafficTimer) clearInterval(this.trafficTimer);
-    this.rateTimer = this.trafficTimer = null;
+    if (this.kickTimer) clearTimeout(this.kickTimer);
+    this.rateTimer = this.trafficTimer = this.kickTimer = null;
   }
   restart() { this.start(); }
   _pushInfo() {
@@ -53,19 +61,28 @@ class Collector {
    * 是否处于演示态：真实（非 demo 标记）下载器一台都没有。
    * 注意不能用「enabled 数量」判断——演示态会注册虚拟下载器占位。
    */
-  isDemo() { return this.store.listDownloaders().filter(d => !d.demo).length === 0; }
-  /** 有真实下载器后，清掉演示占位数据 */
+  isDemo() {
+    // 用户一旦增删过下载器就锁定为真实态；否则删光会被演示逻辑立刻回填，表现为"删了又跳出来"
+    if (this.store.data.demoOptedOut) return false;
+    return this.store.listDownloaders().filter(d => !d.demo).length === 0;
+  }
+  /** 有真实下载器（或用户已接管配置）后，清掉演示占位数据 */
   purgeDemoIfReal() {
     if (this.isDemo()) return false;
     const store = this.store;
     const before = store.data.downloaders.length;
     store.data.downloaders = store.data.downloaders.filter(d => !d.demo);
     let changed = store.data.downloaders.length !== before;
-    for (const id of [101, 102, 103, 104, 105, 106]) {
-      if (store.data.state[id]) { delete store.data.state[id]; changed = true; }
-      if (store.data.hourly[id]) { delete store.data.hourly[id]; changed = true; }
+    // demo id 从定义派生，避免三处硬编码不同步
+    for (const d of this._demoDefs()) {
+      if (store.data.state[d.id]) { delete store.data.state[d.id]; changed = true; }
+      if (store.data.hourly[d.id]) { delete store.data.hourly[d.id]; changed = true; }
     }
-    if (changed) store.save();
+    if (changed) {
+      // 演示数据被清掉后，下次若主动恢复演示，速率历史应重新预填
+      this._demoRateSeeded = false;
+      store.save();
+    }
     return changed;
   }
 
@@ -84,7 +101,8 @@ class Collector {
         const per = {};
         await Promise.all(dls.map(async d => {
           try {
-            const cfg = Number(this.store.getSettings().request_timeout) || 5000;
+            // request_timeout 单位是秒（与 main.js 的 dl:test 口径一致），下面再乘 1000
+            const cfg = Number(this.store.getSettings().request_timeout) || 5;
             const c = clients.makeClient(d, cfg * 1000);
             const r = await c.fetch();
             const st = this.store.getState(d.id);
@@ -128,8 +146,10 @@ class Collector {
           const dl = st.live_dl_total, up = st.live_up_total;
           const r1 = clients.increment(dl, st.last_dl_total);
           const r2 = clients.increment(up, st.last_up_total);
-          if (r1.event === 'ok' || r1.event === 'reset' || r1.event === 'spike') st.last_dl_total = dl;
-          if (r2.event === 'ok' || r2.event === 'reset' || r2.event === 'spike') st.last_up_total = up;
+          // 首轮必须先建立基线：no_base 时不写回，下一轮仍是 no_base，inc 永远为 0，
+          // 真实下载器的流量统计会彻底失效（演示态直接写数值，掩盖了这个缺陷）
+          if (r1.event === 'no_base' || r1.event === 'ok' || r1.event === 'reset' || r1.event === 'spike') st.last_dl_total = dl;
+          if (r2.event === 'no_base' || r2.event === 'ok' || r2.event === 'reset' || r2.event === 'spike') st.last_up_total = up;
           this.store.recordTraffic(d.id, ts, r1.inc, r2.inc);
         }
       }
@@ -215,7 +235,7 @@ class Collector {
   _demoTraffic(ts) {
     this._ensureDemoDownloaders();
     // 为今天每个已过去的小时补一份稳定的演示流量
-    const demoIds = [101, 102, 103, 104, 105, 106];
+    const demoIds = this._demoDefs().map(d => d.id);
     const dayStart = require('./timeutil').dayStartTs(require('./timeutil').dayKey(ts));
     const curHour = require('./timeutil').hourFloor(ts);
     const base = [1.6e9, 38e9, 6e9, 2e9, 0.8e9, 1.2e9]; // 各下载器今日下载量级

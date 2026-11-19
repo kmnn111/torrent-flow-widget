@@ -22,6 +22,8 @@
     rate: { range: 'live', dir: 'both', offset: 0, data: null, hover: null },
     traffic: { range: '24h', dir: 'both', offset: 0, data: null, hover: null },
     chartPick: new Set(['all']), // 选中的下载器（'all' 或 id 字符串）
+    _chartReq: { rate: 0, traffic: 0 }, // 图表请求序号，防旧回包覆盖新范围
+    _periodReq: { day: 0, week: 0, month: 0, year: 0 },
     refreshTimer: null, lastUpdate: 0, fetching: false
   };
 
@@ -102,15 +104,28 @@
     } finally { state.fetching = false; }
   }
   async function loadPeriod(gran) {
-    try { state.periods[gran] = await window.flow.periods(gran); renderSummary(); } catch (e) { }
+    const req = (state._periodReq[gran] || 0) + 1;
+    state._periodReq[gran] = req;
+    try {
+      const data = await window.flow.periods(gran);
+      if (state._periodReq[gran] !== req) return; // 丢弃过期回包
+      state.periods[gran] = data;
+      renderSummary();
+    } catch (e) { }
   }
   async function loadChart(which) {
     const st = state[which];
+    // 请求序号：快速切换范围/回看时，旧回包可能晚于新回包到达，必须丢弃过期结果，
+    // 否则图表会显示错的时间范围（与天气台搜索/切城同类竞态）
+    const req = (state._chartReq[which] || 0) + 1;
+    state._chartReq[which] = req;
+    const range = st.range, offset = st.offset;
     try {
-      const data = await window.flow.chart({ range: st.range, metric: which, offset: st.offset });
+      const data = await window.flow.chart({ range, metric: which, offset });
+      if (state._chartReq[which] !== req) return; // 已有更新的请求，丢弃本次回包
       st.data = data;
       if (which === 'rate') drawRate(animateFlag); else drawTraffic(animateFlag);
-    } catch (e) { console.error('[app] chart ' + which, e); }
+    } catch (e) { if (state._chartReq[which] === req) console.error('[app] chart ' + which, e); }
   }
   let animateFlag = false;
 
@@ -132,7 +147,7 @@
     $('healthTxt').textContent = state.isDemo ? '演示数据' : (count ? `${online}/${count} 在线` : '未配置下载器');
     $('srcLine').textContent = state.isDemo
       ? '演示数据 · 在设置里添加下载器后自动切换为真实数据'
-      : `累计计数器差分统计 · ${count} 台下载器`;
+      : (count ? `累计计数器差分统计 · ${count} 台下载器` : '未配置下载器 · 请在设置里添加');
     $('lastUpdate').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
   }
 
@@ -196,6 +211,16 @@
           <span class="d">↓ ${fmtRate(d.dl_rate)}</span>
         </div>
       </div>`;
+    }
+    // 真实器删光后显示明确的空态与入口，而不是一张全 0 的汇总卡让人以为程序坏了
+    if (!list.length && !state.isDemo) {
+      strip.innerHTML = `<div class="dl-card empty" id="dlEmpty">
+        <div class="empty-title">尚未配置下载器</div>
+        <div class="empty-sub">在设置里填 qBittorrent / Transmission 的地址与账号即可开始统计</div>
+        <button class="pill-btn sm primary" id="btnEmptySettings">去设置</button>
+      </div>`;
+      $('btnEmptySettings').addEventListener('click', () => $('btnSettings').click());
+      return;
     }
     strip.innerHTML = html;
     $('dlSummary').addEventListener('click', () => showSummaryDetailAll());
@@ -267,6 +292,7 @@
         up: upParts.reduce((a, p) => a + p.value, 0),
         down: downParts.reduce((a, p) => a + p.value, 0) };
     });
+    data._groups = groups; // 供悬停提示读取各分组数值
     const spanRange = ['24h', 'yesterday'].indexOf(st.range) >= 0;
     const tipTitles = spanRange ? (data.spans || []).map(sp => sp ? fmtSpanTitle(sp[0], sp[1]) : '') : null;
     let axisLabels = data.labels;
@@ -321,7 +347,7 @@
     document.querySelectorAll('.dd-menu').forEach(m => m.hidden = true);
   }
   bindDropdown('rateRangeTrigger', 'rateRangeMenu', RATE_RANGES, () => state.rate.range, v => {
-    state.rate.range = v; state.rate.offset = 0; loadChart('rate');
+    state.rate.range = v; state.rate.offset = 0; state.rate.hover = null; loadChart('rate');
   });
   bindDropdown('rateDirTrigger', 'rateDirMenu', DIR_OPTS, () => state.rate.dir, v => { state.rate.dir = v; drawRate(false); });
   $('rateDirTrigger').textContent = '方向 · 双向';
@@ -331,7 +357,7 @@
     $('rateDirTrigger').textContent = '方向 · ' + (DIR_OPTS.find(x => x[0] === v) || [])[1];
   });
   bindDropdown('trafficRangeTrigger', 'trafficRangeMenu', TRAFFIC_RANGES, () => state.traffic.range, v => {
-    state.traffic.range = v; state.traffic.offset = 0; loadChart('traffic');
+    state.traffic.range = v; state.traffic.offset = 0; state.traffic.hover = null; loadChart('traffic');
   });
   bindDropdown('trafficDirTrigger', 'trafficDirMenu', DIR_OPTS, () => state.traffic.dir, v => { state.traffic.dir = v; drawTraffic(false); });
   $('trafficDirTrigger').textContent = '方向 · 双向';
@@ -341,8 +367,8 @@
   });
   document.addEventListener('click', closeAllMenus);
 
-  $('rateLatest').addEventListener('click', () => { state.rate.offset = 0; loadChart('rate'); });
-  $('trafficLatest').addEventListener('click', () => { state.traffic.offset = 0; loadChart('traffic'); });
+  $('rateLatest').addEventListener('click', () => { state.rate.offset = 0; state.rate.hover = null; loadChart('rate'); });
+  $('trafficLatest').addEventListener('click', () => { state.traffic.offset = 0; state.traffic.hover = null; loadChart('traffic'); });
 
   /* ================= 面板 / 窗口按钮 ================= */
   function openSettings() { $('settingsPanel').classList.add('open'); }
@@ -393,7 +419,8 @@
       resetForm(); renderDlConfig(); refreshAll(false);
     });
     $('btnTest').addEventListener('click', async () => {
-      const d = { name: $('fName').value.trim(), type: $('fType').value, url: $('fUrl').value.trim(), username: $('fUser').value.trim(), password: $('fPass').value };
+      const id = Number($('fId').value) || 0;
+      const d = { id, name: $('fName').value.trim(), type: $('fType').value, url: $('fUrl').value.trim(), username: $('fUser').value.trim(), password: $('fPass').value };
       if (!/^https?:\/\//i.test(d.url)) { $('formMsg').textContent = '地址要以 http:// 或 https:// 开头'; return; }
       $('formMsg').textContent = '测试中…';
       let r;
@@ -404,6 +431,12 @@
     });
     $('btnResetForm').addEventListener('click', resetForm);
     $('btnRecolor').addEventListener('click', async () => { await window.flow.dlRecolor(); refreshAll(false); });
+    $('btnResetDemo').addEventListener('click', async () => {
+      await window.flow.dlResetDemo();
+      resetForm();
+      await renderDlConfig();
+      await refreshAll(false);
+    });
     // 采集选项
     renderCollectOptions();
     $('btnSaveCollect').addEventListener('click', async () => {
@@ -424,14 +457,18 @@
       $('chkTrayInfo').checked = state.settings.trayInfo !== false;
       $('motionSelect').value = state.settings.motion || 'on';
     }
-    const winPatch = k => window.flow.updateSettings({ [k]: document.querySelector('#' + k).checked });
     $('chkTop').addEventListener('change', () => { window.flow.updateSettings({ alwaysOnTop: $('chkTop').checked }); });
     $('chkAuto').addEventListener('change', () => { window.flow.updateSettings({ autoLaunch: $('chkAuto').checked }); });
     $('chkEdgeDock').addEventListener('change', () => { window.flow.updateSettings({ edgeDock: $('chkEdgeDock').checked }); });
-    $('chkTrayInfo').addEventListener('change', () => { state.settings.trayInfo = $('chkTrayInfo').checked; });
-    $('motionSelect').addEventListener('change', () => {
+    // 托盘开关此前只改内存不落盘，重启即丢
+    $('chkTrayInfo').addEventListener('change', () => {
+      window.flow.updateSettings({ trayInfo: $('chkTrayInfo').checked });
+      updateTrayInfo();
+    });
+    $('motionSelect').addEventListener('change', async () => {
       const off = $('motionSelect').value === 'off';
       document.documentElement.classList.toggle('motion-off', off);
+      await window.flow.updateSettings({ motion: $('motionSelect').value });
     });
     // 设置页切换
     document.querySelectorAll('.st-nav').forEach(btn => {
@@ -453,8 +490,8 @@
     box.innerHTML = list.length ? list.map(d => `<div class="dl-config-row" data-id="${d.id}">
       <span class="cname">${esc(d.name)}</span><span class="ctype">${d.type === 'tr' ? 'TR' : 'QB'}</span>
       <button data-act="edit">编辑</button><button data-act="del" class="del">删除</button>
-    </div>`).join('') : '<p class="hint">暂无下载器。当前为演示数据，添加后自动切换为真实数据。</p>';
-    $('demoHint').textContent = list.length ? '' : '当前演示数据 · 添加下载器即切真实';
+    </div>`).join('') : '<p class="hint">暂无下载器。下方添加一个即可开始采集真实数据。</p>';
+    $('demoHint').textContent = list.length ? '' : '未配置下载器 · 可添加或恢复演示';
     box.querySelectorAll('.dl-config-row').forEach(row => {
       const id = Number(row.getAttribute('data-id'));
       row.querySelector('[data-act="edit"]').addEventListener('click', () => {
@@ -464,8 +501,16 @@
         $('fEnabled').checked = !!d.enabled; $('formTitle').textContent = '编辑下载器'; $('formMsg').textContent = '';
       });
       row.querySelector('[data-act="del"]').addEventListener('click', async () => {
-        if (!confirm('确定删除该下载器？')) return;
-        await window.flow.dlDelete(id); renderDlConfig(); refreshAll(false);
+        // 应用内二次确认：原生 confirm 在无边框透明窗上会弹出游离的系统模态框，体验割裂
+        const btn = row.querySelector('[data-act="del"]');
+        if (btn.dataset.armed !== '1') {
+          btn.dataset.armed = '1'; btn.textContent = '再点一次确认';
+          setTimeout(() => { if (btn.isConnected) { btn.dataset.armed = ''; btn.textContent = '删除'; } }, 3000);
+          return;
+        }
+        const r = await window.flow.dlDelete(id);
+        if (r && r.error) { $('formMsg').textContent = '删除失败：' + r.error; return; }
+        await renderDlConfig(); refreshAll(false);
       });
     });
   }
@@ -561,16 +606,252 @@
     window.flow.trayInfo(txt);
   }
 
+  /* ================= iOS 式惯性滚动 =================
+     移植自天气台：原生 Windows 滚轮一格一格跳，观感生硬。
+     拦截 wheel 累积目标位置、rAF 指数插值追目标，得到平滑减速；
+     滚动期给容器加 .scrolling 关掉卡片 backdrop-filter——透明窗上每帧重采样桌面是掉帧主因。 */
+  function markScrolling(el) {
+    if (!el.classList.contains('scrolling')) el.classList.add('scrolling');
+    const panel = el.classList.contains('panel-body') ? document.querySelector('.panel') : null;
+    if (panel) {
+      panel.classList.add('scrolling');
+      clearTimeout(panel._scrollEndTimer);
+      panel._scrollEndTimer = setTimeout(() => panel.classList.remove('scrolling'), 180);
+    }
+    clearTimeout(el._scrollEndTimer);
+    el._scrollEndTimer = setTimeout(() => el.classList.remove('scrolling'), 180);
+  }
+  function initSmoothScroll(el) {
+    if (!el) return;
+    let target = el.scrollTop, animating = false, raf = 0, selfTop = -1, lastStep = 0;
+    const EASE = 0.18;
+    const maxTop = () => Math.max(0, el.scrollHeight - el.clientHeight);
+
+    function step(now) {
+      raf = 0;
+      // rAF 被系统掐断再恢复时不能按冻结的旧 target 硬拽回去；短暂掉帧则一次落地，长挂起才放弃
+      if (lastStep && now - lastStep > 250) {
+        const gap = now - lastStep;
+        if (gap < 2000) {
+          const safe = Math.min(Math.max(0, target), maxTop());
+          selfTop = safe; el.scrollTop = safe;
+        } else {
+          target = el.scrollTop;
+        }
+        animating = false; return;
+      }
+      lastStep = now;
+      if (target > maxTop()) target = maxTop();
+      const cur = el.scrollTop;
+      const next = cur + (target - cur) * EASE;
+      if (Math.abs(target - cur) < 0.6) {
+        selfTop = target; el.scrollTop = target; animating = false; return;
+      }
+      selfTop = next; el.scrollTop = next;
+      markScrolling(el);
+      raf = requestAnimationFrame(step);
+    }
+    el.addEventListener('wheel', e => {
+      // 图表区域滚轮交给图表自己处理（隐藏提示），且 Ctrl+滚轮缩放交还原生
+      if (e.ctrlKey) return;
+      if (e.target.closest && e.target.closest('.chart-viewport')) return;
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+      e.preventDefault();
+      const raw = e.deltaY * (e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? el.clientHeight : 1);
+      // 一格 120px 直接跳太猛：0.55 缩放 + 72px 封顶 ≈ 一格 66px（约 3 行）
+      const d = e.deltaMode === 2 ? raw * 0.85 : Math.sign(raw) * Math.min(Math.abs(raw) * 0.55, 72);
+      if (!animating) target = el.scrollTop;
+      target = Math.min(maxTop(), Math.max(0, target + d));
+      markScrolling(el);
+      if (!animating) {
+        animating = true; lastStep = 0;
+        selfTop = el.scrollTop;
+        raf = requestAnimationFrame(step);
+      }
+    }, { passive: false });
+    // 外部滚动（脚本 / 键盘 / 滚动条）→ 取消惯性并接管目标，避免被旧 target 拽回
+    el.addEventListener('scroll', () => {
+      if (animating && selfTop >= 0 && Math.abs(el.scrollTop - selfTop) < 1.5) { markScrolling(el); return; }
+      animating = false;
+      if (raf) { cancelAnimationFrame(raf); raf = 0; }
+      target = el.scrollTop;
+      markScrolling(el);
+    }, { passive: true });
+  }
+
+  /* ================= 鼠标纵向拖拽滚屏 =================
+     滚动条隐藏后按住内容上下拖 = 1:1 跟手，松手按速度惯性滑行；
+     方向锁避免与窗口拖拽打架，交互控件豁免。 */
+  function initDragScrollY(el) {
+    if (!el) return;
+    let down = false, axis = '', startX = 0, startY = 0, startTop = 0, lastY = 0, lastT = 0, vel = 0, raf = 0, moved = false;
+    const stopInertia = () => { if (raf) { cancelAnimationFrame(raf); raf = 0; } };
+    el.addEventListener('mousedown', e => {
+      if (e.button !== 0) return;
+      const r = el.getBoundingClientRect(), cs = getComputedStyle(el);
+      const bl = parseFloat(cs.borderLeftWidth) || 0, bt = parseFloat(cs.borderTopWidth) || 0;
+      if (e.clientX - r.left - bl >= el.clientWidth || e.clientY - r.top - bt >= el.clientHeight) return;
+      const t = e.target;
+      if (t.closest && t.closest('.drag, .mod-handle, input, textarea, select, button, a, label, .dl-switch')) return;
+      down = true; axis = ''; moved = false;
+      startX = e.clientX; startY = lastY = e.clientY; startTop = el.scrollTop;
+      lastT = performance.now(); vel = 0;
+      stopInertia();
+    });
+    window.addEventListener('mousemove', e => {
+      if (!down) return;
+      const dy = e.clientY - startY, dx = e.clientX - startX;
+      if (!axis) {
+        if (Math.abs(dy) < 5 && Math.abs(dx) < 5) return;
+        axis = Math.abs(dy) > Math.abs(dx) ? 'y' : 'x';
+      }
+      if (axis !== 'y') return;
+      e.preventDefault();
+      if (Math.abs(dy) > 3) moved = true;
+      el.scrollTop = startTop - dy;
+      const now = performance.now(), dt = now - lastT;
+      if (dt > 0) { vel = (e.clientY - lastY) / dt; lastY = e.clientY; lastT = now; }
+      markScrolling(el);
+    });
+    const end = () => {
+      if (!down) return;
+      down = false;
+      if (moved) {
+        const kill = ev => { ev.stopPropagation(); ev.preventDefault(); };
+        el.addEventListener('click', kill, { capture: true, once: true });
+        setTimeout(() => el.removeEventListener('click', kill, true), 400);
+      }
+      if (axis === 'y' && Math.abs(vel) > 0.12 && performance.now() - lastT < 80) {
+        const step = () => {
+          vel *= 0.94;
+          el.scrollTop -= vel * 16;
+          markScrolling(el);
+          const edge = el.scrollTop <= 0 || el.scrollTop >= el.scrollHeight - el.clientHeight - 1;
+          if (Math.abs(vel) > 0.02 && !edge) raf = requestAnimationFrame(step);
+          else raf = 0;
+        };
+        raf = requestAnimationFrame(step);
+      }
+    };
+    window.addEventListener('mouseup', end);
+    window.addEventListener('blur', end);
+    el.addEventListener('wheel', stopInertia, { passive: true });
+    el.addEventListener('dragstart', e => e.preventDefault());
+  }
+
+  /* ================= 图表悬停提示 =================
+     图表引擎在 drawLines/drawBars 后把命中所需的几何数据留在 cv._geom，
+     这里做 hit-test 并把结果写进 #tooltip。此前 hover 链路完全没接线，
+     README 里写的"悬停读数"其实是死功能。 */
+  function bindChartHover(canvasId, which) {
+    const cv = $(canvasId);
+    if (!cv) return;
+    const tip = $('tooltip');
+    const host = cv.parentElement;
+    let raf = 0;
+    function hit(clientX, clientY) {
+      const g = cv._geom;
+      if (!g) return null;
+      const r = cv.getBoundingClientRect();
+      const x = clientX - r.left, y = clientY - r.top;
+      if (x < g.pad.l || x > g.w - g.pad.r || y < g.pad.t || y > g.h - g.pad.b) return null;
+      let i;
+      if (g.type === 'lines') {
+        i = Math.round(((x - g.pad.l) / (g.w - g.pad.l - g.pad.r)) * (g.n - 1));
+      } else {
+        i = Math.floor((x - g.pad.l) / g.groupW);
+      }
+      return Math.max(0, Math.min((g.type === 'lines' ? g.n : g.groups.length) - 1, i));
+    }
+    function show(clientX, clientY) {
+      const st = state[which], data = st && st.data;
+      if (!data) return;
+      const i = hit(clientX, clientY);
+      if (i == null) { hide(); return; }
+      if (st.hover !== i) {
+        st.hover = i;
+        // 只重绘数据层，不动坐标轴；用 rAF 合并高频 mousemove，避免掉帧
+        if (!raf) raf = requestAnimationFrame(() => {
+          raf = 0;
+          if (which === 'rate') drawRate(false); else drawTraffic(false);
+        });
+      }
+      const title = (data.spans && data.spans[i]) ? fmtSpanTitle(data.spans[i][0], data.spans[i][1]) : (data.labels ? data.labels[i] : '');
+      const rows = [`<b>${esc(title || '')}</b>`];
+      if (which === 'rate') {
+        // 汇总永远置顶；单机按当前点数值大小排序，只显示前 4 台，避免十几行提示框盖住半屏
+        const series = pickSeries(data).slice();
+        const sum = series.find(s => s.id === 0);
+        if (sum) {
+          const u = sum.up && sum.up[i], d = sum.down && sum.down[i];
+          if (u != null) rows.push(`<span style="color:${sum.color_up}">↑ 汇总 ${fmtRate(u)}</span>`);
+          if (d != null) rows.push(`<span style="color:${sum.color_down}">↓ 汇总 ${fmtRate(d)}</span>`);
+        }
+        const others = series.filter(s => s.id !== 0).map(s => ({
+          s, v: Math.max(Number(s.up && s.up[i]) || 0, Number(s.down && s.down[i]) || 0)
+        })).sort((a, b) => b.v - a.v).slice(0, 4);
+        for (const { s } of others) {
+          const u = s.up && s.up[i], d = s.down && s.down[i];
+          if (u != null) rows.push(`<span style="color:${s.color_up}">↑ ${esc(s.name)} ${fmtRate(u)}</span>`);
+          if (d != null) rows.push(`<span style="color:${s.color_down}">↓ ${esc(s.name)} ${fmtRate(d)}</span>`);
+        }
+        const hidden = series.length - 1 - others.length;
+        if (hidden > 0) rows.push(`<span style="color:var(--ink-soft)">…另有 ${hidden} 台</span>`);
+      } else {
+        const grp = data._groups && data._groups[i];
+        if (grp) {
+          rows.push(`<span class="u">↑ ${fmtBytes(grp.up)}</span>`);
+          rows.push(`<span class="d">↓ ${fmtBytes(grp.down)}</span>`);
+          const top = (grp.upParts || []).concat(grp.downParts || [])
+            .filter(p => p.value > 0).sort((a, b) => b.value - a.value).slice(0, 3);
+          for (const p of top) rows.push(`<span style="color:${p.color}">${esc(p.name)} ${fmtBytes(p.value)}</span>`);
+        }
+      }
+      tip.innerHTML = rows.join('<br>');
+      tip.hidden = false;
+      // 贴着鼠标放，靠近右/下边界时翻到另一侧
+      const tw = tip.offsetWidth, th = tip.offsetHeight;
+      let left = clientX + 14, top = clientY + 14;
+      if (left + tw > window.innerWidth - 8) left = clientX - tw - 14;
+      if (top + th > window.innerHeight - 8) top = clientY - th - 14;
+      tip.style.left = Math.max(4, left) + 'px';
+      tip.style.top = Math.max(4, top) + 'px';
+    }
+    function hide() {
+      if (tip) tip.hidden = true;
+      const st = state[which];
+      if (st && st.hover != null) {
+        st.hover = null;
+        if (!raf) raf = requestAnimationFrame(() => {
+          raf = 0;
+          if (which === 'rate') drawRate(false); else drawTraffic(false);
+        });
+      }
+    }
+    host.addEventListener('mousemove', e => show(e.clientX, e.clientY));
+    host.addEventListener('mouseleave', hide);
+    host.addEventListener('wheel', hide, { passive: true });
+  }
+
   /* ================= 吸顶小窗拖拽 ================= */
   (function bindDrag() {
-    const grip = document.querySelector('.pill-grip') || document.querySelector('.hero-top');
-    if (!grip) return;
     let dragging = false;
-    grip.addEventListener('mousedown', e => {
-      dragging = true; window.flow.winDrag(e.screenX, e.screenY);
+    // 两个抓手都要绑定。此前用 `a || b`，而 .pill-grip 始终在 DOM 里（只是 CSS 隐藏），
+    // 导致 .hero-top 的手动拖拽回退永远不生效——Win11 下 app-region:drag 失效时大窗拖不动。
+    document.querySelectorAll('.pill-grip, .hero-top').forEach(grip => {
+      grip.addEventListener('mousedown', e => {
+        if (e.button !== 0) return;
+        if (e.target.closest('button, .dl-switch, input, select, label')) return;
+        e.preventDefault();                    // 拖动时不选中文字
+        window.flow.winDragEnd();              // 作废旧基准：上次拖拽若丢了 up，按旧基准续算会整窗回跳
+        dragging = true;
+        window.flow.winDrag(e.screenX, e.screenY);
+      });
     });
     window.addEventListener('mousemove', e => { if (dragging) window.flow.winDrag(e.screenX, e.screenY); });
-    window.addEventListener('mouseup', () => { if (dragging) { dragging = false; window.flow.winDragEnd(); } });
+    const end = () => { if (dragging) { dragging = false; window.flow.winDragEnd(); } };
+    window.addEventListener('mouseup', end);
+    window.addEventListener('blur', end);      // 拖拽中切走窗口松手会卡在拖动态，失焦兜底
   })();
 
   /* ================= 初始化 ================= */
@@ -580,7 +861,7 @@
     const off = state.settings.motion === 'off';
     document.documentElement.classList.toggle('motion-off', off);
     if (state.settings.alwaysOnTop) $('btnPin').style.color = 'var(--sun-deep)';
-    $('panelVersion').textContent = 'v1.0.0';
+    $('panelVersion').textContent = 'v' + ((window.flow.version && window.flow.version()) || '1.0.1');
     tickClock();
     if (!window.__clockTimer) window.__clockTimer = setInterval(tickClock, 1000);
     // 回到前台立刻补一次刷新，避免隐藏期间暂停刷新导致数据看起来是旧的
@@ -588,6 +869,11 @@
       if (!document.hidden) refreshAll(false);
     });
     bindSettings();
+    initSmoothScroll($('widget'));
+    initSmoothScroll(document.querySelector('.panel-body'));
+    initDragScrollY($('widget'));
+    bindChartHover('rateChart', 'rate');
+    bindChartHover('trafficChart', 'traffic');
     await refreshAll(false);
     animateFlag = true; // 后续刷新启用帧平移动画
     // 实时事件：rate 局部刷新
@@ -595,12 +881,40 @@
     window.flow.onData('traffic', () => { /* traffic 完成由 rate 事件已覆盖，避免双刷 */ });
     // 吸顶状态
     window.flow.onDockState(s => {
+      document.body.classList.toggle('docked', !!s.docked);
+      document.body.classList.toggle('expanded', !!s.expanded);
       $('pill').classList.toggle('show', !!s.docked && !s.expanded);
       $('widget').classList.toggle('dock-hidden', !!s.docked && !s.expanded);
       if (s.docked) {
         const pr = document.getElementById('rateChart');
         if (pr) pr.style.display = '';
       }
+    });
+    // 即时 hover 派发：主进程虽有 260ms 轮询，但没有这条链路时展开/收起总是慢半拍。
+    // 鼠标进入/移动立刻通知，离开交给主进程 450ms 收起；按住拖拽期间保活防缩回。
+    let hoverTick = 0;
+    const sendHover = on => { try { window.flow.dockHover(on); } catch (e) { } };
+    document.addEventListener('mouseenter', () => {
+      if (document.body.classList.contains('docked')) sendHover(true);
+    });
+    document.addEventListener('mouseleave', () => {
+      if (document.body.classList.contains('docked')) sendHover(false);
+    });
+    document.addEventListener('mousemove', () => {
+      if (!document.body.classList.contains('docked')) return;
+      const now = Date.now();
+      if (now - hoverTick < 300) return;
+      hoverTick = now;
+      sendHover(true);
+    });
+    document.addEventListener('pointerdown', () => {
+      if (!document.body.classList.contains('docked')) return;
+      sendHover(true);
+      clearInterval(window.__dockHold);
+      window.__dockHold = setInterval(() => sendHover(true), 250);
+    });
+    document.addEventListener('pointerup', () => {
+      clearInterval(window.__dockHold); window.__dockHold = null;
     });
     window.flow.onTrayAction(a => {
       if (!a) return;

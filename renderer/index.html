@@ -143,6 +143,7 @@
         <section class="st-page" data-page="downloaders">
           <div class="cfg-tools">
             <button class="pill-btn sm" id="btnRecolor">🎨 重新配色</button>
+            <button class="pill-btn sm ghost" id="btnResetDemo" title="清空真实下载器并恢复内置演示数据">恢复演示</button>
             <span class="hint" id="demoHint"></span>
           </div>
           <div id="dlConfigList" class="dl-config-list"></div>
@@ -151,9 +152,9 @@
             <input type="hidden" id="fId" />
             <label>名称<input id="fName" placeholder="例如 qb1(下载)" maxlength="60" /></label>
             <label>类型<select id="fType"><option value="qb">qBittorrent</option><option value="tr">Transmission</option></select></label>
-            <label class="span2">WebUI / RPC 地址<input id="fUrl" placeholder="http://192.168.1.11:8080" /></label>
-            <label>用户名<input id="fUser" placeholder="admin（TR 可留空）" maxlength="120" /></label>
-            <label>密码<input id="fPass" type="password" placeholder="新增时填写；编辑留空表示不改" maxlength="200" /></label>
+            <label class="span2">WebUI / RPC 地址<input id="fUrl" placeholder="http://192.168.1.11:8080" maxlength="500" spellcheck="false" autocomplete="off" /></label>
+            <label>用户名<input id="fUser" placeholder="admin（TR 可留空）" maxlength="120" autocomplete="off" spellcheck="false" /></label>
+            <label>密码<input id="fPass" type="password" placeholder="新增时填写；编辑留空表示不改" maxlength="200" autocomplete="new-password" /></label>
             <label class="check"><input type="checkbox" id="fEnabled" checked /> 启用采集</label>
             <div class="form-actions span2">
               <button type="button" class="pill-btn sm" id="btnTest">测试连接</button>

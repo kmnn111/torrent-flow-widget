@@ -72,6 +72,15 @@ html, body {
 }
 .drag { -webkit-app-region: drag; }
 .no-drag, button, input, select, label { -webkit-app-region: no-drag; }
+/* 可编辑控件必须可显示光标：user-select 是继承属性，
+   html/body 上的 user-select:none 会一路继承进 input，导致 caret 被抑制、
+   文字选不中、鼠标不是 I 型指针，看起来像"输入框坏了"。这里统一兜底覆盖。 */
+input, textarea, select, [contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
+  caret-color: var(--ink);
+  cursor: text;
+}
 [hidden] { display: none !important; }
 
 /* 圆角玻璃轮廓 */
@@ -111,7 +120,7 @@ html, body {
 
 /* 吸顶流量小窗 */
 #pill {
-  position: fixed; top: 0; left: 50%; width: 300px; height: 64px; z-index: 40;
+  position: fixed; top: 0; left: 50%; transform: translateX(-50%); width: 300px; height: 64px; z-index: 40;
   display: flex; align-items: center; gap: 10px; padding: 0 14px 0 4px;
   background: linear-gradient(150deg, rgba(255,252,246,.72), rgba(224,240,252,.62));
   border: 1px solid rgba(255,255,255,.6); border-radius: 22px;
@@ -137,9 +146,22 @@ html, body {
 .pill-today .pt-line { white-space: nowrap; }
 
 /* 主内容滚动区 */
-#widget { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; padding: 14px 16px 20px; scrollbar-width: none; }
-#widget::-webkit-scrollbar { width: 0; }
-#widget.dock-hidden { opacity: 0; pointer-events: none; transition: opacity .18s ease; }
+#widget { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; padding: 14px 16px 20px;
+  scrollbar-width: none; -ms-overflow-style: none; overscroll-behavior: contain; cursor: grab; }
+#widget::-webkit-scrollbar, .panel-body::-webkit-scrollbar { width: 0; height: 0; display: none; }
+#widget.dock-hidden, body.docked:not(.expanded) #widget {
+  opacity: 0; visibility: hidden; pointer-events: none;
+  transition: opacity .2s ease, visibility 0s .2s;
+}
+/* 交互控件还原指针，避免 grab 光标出现在按钮上 */
+#widget button, #widget input, #widget select, #widget .dl-card { cursor: pointer; }
+/* 滚动期降载：透明窗上 backdrop-filter 每帧重采样桌面是掉帧与频闪的主因，
+   滚动时用略实的底色近似玻璃观感，停下 180ms 后自动恢复 */
+#widget.scrolling .card, .panel-body.scrolling > * { backdrop-filter: none; -webkit-backdrop-filter: none; }
+#widget.scrolling .card { background: rgba(255, 252, 246, .78); transition: none; }
+.panel.scrolling { backdrop-filter: none; -webkit-backdrop-filter: none; background: rgba(255,252,246,.94); }
+:root.night #widget.scrolling .card { background: rgba(28, 40, 58, .78); }
+:root.night .panel.scrolling { background: rgba(28, 40, 58, .94); }
 
 /* 卡片 */
 .card { background: var(--paper); border: 1px solid rgba(255,255,255,.55); border-radius: var(--radius);
@@ -186,21 +208,23 @@ html, body {
 
 /* 四周期汇总卡 */
 .summary-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 12px; }
-.sum-card { background: var(--paper); border: 1px solid rgba(255,255,255,.55); border-radius: var(--radius); padding: 12px 13px; box-shadow: var(--shadow); position: relative; min-height: 92px; }
+.sum-card { background: var(--paper); border: 1px solid rgba(255,255,255,.55); border-radius: var(--radius); padding: 12px 11px 20px; box-shadow: var(--shadow); position: relative; min-height: 100px; }
 :root.night .sum-card { border-color: rgba(200,220,255,.14); }
 .sum-period { font-size: 12px; font-weight: 700; color: var(--ink); display: flex; align-items: center; justify-content: space-between; }
 .sum-range { font-size: 9px; color: var(--ink-soft); font-weight: 400; }
 .sum-vals { margin-top: 9px; display: flex; flex-direction: column; gap: 4px; font-variant-numeric: tabular-nums; }
-.sum-row { display: flex; justify-content: space-between; font-size: 11px; }
+.sum-row { display: flex; justify-content: space-between; align-items: baseline; gap: 3px; font-size: 10.5px; }
+.sum-row .lbl { flex: none; }
+.sum-row .num { font-size: 10.5px; white-space: nowrap; }
 .sum-row .lbl { color: var(--ink-soft); }
 .sum-row .num { font-weight: 700; }
 .sum-row.up .num { color: var(--up); }
 .sum-row.down .num { color: var(--down); }
-.sum-history { position: absolute; right: 10px; bottom: 8px; font-size: 9px; color: var(--ink-soft); cursor: pointer; text-decoration: underline dotted; opacity: .7; }
+.sum-history { position: absolute; left: 11px; right: 11px; bottom: 6px; font-size: 9px; color: var(--ink-soft); cursor: pointer; text-decoration: underline dotted; opacity: .75; text-align: center; white-space: nowrap; overflow: hidden; }
 .sum-history:hover { opacity: 1; }
 
 /* 下载器列表 */
-.dl-strip { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.dl-strip { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
 .dl-card { background: color-mix(in srgb, var(--paper-strong) 80%, transparent); border: 1px solid rgba(255,255,255,.5); border-radius: 12px; padding: 9px 10px; cursor: pointer; transition: transform .12s, box-shadow .12s; position: relative; }
 :root.night .dl-card { border-color: rgba(200,220,255,.12); }
 .dl-card:hover { transform: translateY(-2px); box-shadow: 0 8px 18px rgba(42,32,22,.14); }
@@ -219,6 +243,10 @@ html, body {
 .dl-sum-rates { display: flex; gap: 16px; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .dl-updated { font-size: 10px; color: var(--ink-soft); }
 .demo-badge { display: inline-block; font-size: 9px; color: var(--sun-deep); border: 1px solid rgba(242,169,59,.4); background: rgba(242,169,59,.1); border-radius: 999px; padding: 1px 7px; margin-left: 6px; }
+.dl-card.empty { grid-column: 1 / -1; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 20px; text-align: center; }
+.empty-title { font-size: 13px; font-weight: 700; color: var(--ink); }
+.empty-sub { font-size: 11px; color: var(--ink-soft); }
+.dl-card.empty .pill-btn { margin-top: 4px; }
 
 /* 图表控件 */
 .chart-controls { display: flex; gap: 8px; margin-bottom: 8px; }
@@ -256,7 +284,7 @@ html, body {
   transition: right .28s cubic-bezier(.32,.72,.28,1); display: flex; flex-direction: column; }
 .panel.open { right: 0; }
 .panel-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px; font-size: 16px; font-weight: 700; border-bottom: 1px solid rgba(123,159,196,.2); }
-.panel-body { flex: 1; overflow-y: auto; padding: 14px 18px 30px; scrollbar-width: thin; }
+.panel-body { flex: 1; overflow-y: auto; padding: 14px 18px 30px; scrollbar-width: none; -ms-overflow-style: none; overscroll-behavior: contain; }
 .panel-body h4 { font-size: 12px; margin: 16px 0 6px; color: var(--ink); }
 .hint { font-size: 10px; color: var(--ink-soft); line-height: 1.5; }
 .settings-nav { display: flex; gap: 4px; border-bottom: 1px solid rgba(123,159,196,.2); }
@@ -273,8 +301,9 @@ html, body {
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
 .form-grid label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--ink-soft); }
 .form-grid label.span2 { grid-column: 1 / -1; }
-.form-grid label.check { flex-direction: row; align-items: center; gap: 6px; white-space: nowrap; }
-.form-grid label.check input { width: auto; flex: none; }
+/* 注意：窗口设置页的 .check 不在 .form-grid 内，选择器不能只写 .form-grid label.check */
+.check { display: flex; flex-direction: row; align-items: center; gap: 6px; white-space: nowrap; font-size: 12px; color: var(--ink); }
+.check input { width: auto; flex: none; accent-color: var(--accent); cursor: pointer; }
 .form-grid input, .form-grid select, .select { font-family: inherit; font-size: 12px; padding: 6px 8px; border: 1px solid rgba(123,159,196,.35); border-radius: 7px; background: rgba(255,255,255,.5); color: var(--ink); width: 100%; }
 :root.night .form-grid input, :root.night .form-grid select, :root.night .select { background: rgba(255,255,255,.06); }
 .form-actions { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
@@ -297,7 +326,7 @@ html, body {
 .detail-grid .kv .u { color: var(--up); } .detail-grid .kv .d { color: var(--down); }
 
 /* tooltip */
-.tooltip { position: fixed; z-index: 80; pointer-events: none; background: var(--paper-strong); border: 1px solid rgba(123,159,196,.3); border-radius: 9px; padding: 8px 10px; font-size: 11px; box-shadow: var(--shadow); line-height: 1.6; white-space: nowrap; }
+.tooltip { position: fixed; z-index: 80; pointer-events: none; background: var(--paper-strong); border: 1px solid rgba(123,159,196,.3); border-radius: 9px; padding: 8px 10px; font-size: 11px; box-shadow: var(--shadow); line-height: 1.6; white-space: nowrap; max-height: 60vh; overflow: hidden; }
 
 /* 减少动效（用户显式关闭时） */
 :root.motion-off *, :root.motion-off *::before, :root.motion-off *::after { animation: none !important; transition: none !important; }

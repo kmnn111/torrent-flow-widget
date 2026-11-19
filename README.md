@@ -55,9 +55,30 @@
 - 未配置任何下载器时自动填充 6 台虚拟下载器，打开即有曲线、有柱子、有数值，先看清界面长什么样
 - 添加真实下载器后**自动清空**演示数据，不会和真实数据混在一起
 
+## 🆕 v1.0.1 · 发版后修复
+
+> **已发布（2026-11-19）**：到 [Releases](https://github.com/kmnn111/torrent-flow-widget/releases/latest) 下载 `TorrentFlow-Setup-1.0.1.exe`。v1.0.0 用户启动后会自动收到更新提醒。
+
+**致命修复：真实下载器的流量统计此前完全失效**
+
+- 💰 **差分基线永远建不起来**：`increment()` 首轮返回 `no_base`，但写回条件漏了这个事件，导致基线恒为 `null`、每轮增量恒为 0。演示态直接写数值恰好掩盖了它——所以开发时全部自检通过，真实用户装上却是全 0。现在首轮正确建立基线
+- 💥 **小时桶被写成 `Infinity`**：`last_ts` 全项目无人赋值导致 `span=0`，`w/span || 1` 里的 `Infinity` 是 truthy 让兜底失效。现在写回时间基线，并改用显式除零保护
+- ⚙️ **超时放大 1000 倍**：`request_timeout` 缺字段时 `|| 5000` 再乘 1000，实际变成 83 分钟。统一为秒口径（5 秒）
+
+**用户反馈的问题**
+
+- 🗑 **删掉的下载器自己跳回来**：删光真实器后退回演示态，虚拟器被自动回注。现在用持久化标记记住"用户已接管配置"，删光就是干净的未配置空态；设置页不再列出虚拟器，另提供「恢复演示」入口
+- ⌨️ **输入框没有光标、像不能输入**：`html/body` 的 `user-select:none` 继承进 input 抑制了 caret。现在可编辑控件统一恢复 `user-select:text` + `caret-color` + I 型指针
+- 🖱 **悬停读数是死功能**：图表 hover 链路从未接线。现在补上十字线、时间点与各下载器数值，提示框只显示汇总 + 数值最高的 4 台，不遮挡界面
+- 🏷 **托盘开关改了不保存**：只改内存没落盘，重启即丢。现在持久化，动效开关同样修复
+- 🔀 **快速切图表范围会串数据**：下拉切换绕过防重入，旧回包覆盖新范围。现在加请求序号丢弃过期回包
+- 🖱 **大窗顶部在 Win11 拖不动**：拖拽回退用了 `a || b`，而小窗抓手始终在 DOM 里导致大窗分支失效。现在两个抓手分别绑定
+
+---
+
 ## 🆕 v1.0.0 · 首个版本
 
-> **已发布（2026-11-18）**：到 [Releases](https://github.com/kmnn111/torrent-flow-widget/releases/latest) 下载 `TorrentFlow-Setup-1.0.0.exe`。
+> **已发布（2026-11-18）**：到 [Releases](https://github.com/kmnn111/torrent-flow-widget/releases/tag/v1.0.0) 下载 `TorrentFlow-Setup-1.0.0.exe`。
 
 **从零建成的东西**
 
@@ -85,6 +106,7 @@
 ## 📋 目录
 
 - [功能一览](#-功能一览)
+- [v1.0.1 · 发版后修复](#-v101--发版后修复)
 - [v1.0.0 · 首个版本](#-v100--首个版本)
 - [快速开始](#-快速开始)
   - [下载安装](#下载安装)
@@ -127,8 +149,9 @@ git clone https://github.com/kmnn111/torrent-flow-widget.git
 cd torrent-flow-widget
 npm install        # 安装依赖
 npm start          # 开发运行
-npm run dist       # 打包 NSIS 安装包 → dist/流量台-Setup-x.y.z.exe
-npm run pack       # 只出免安装目录 → dist/win-unpacked
+npm test           # 60 项回归自检（核心 / 演示态边界 / 差分记账）
+npm run dist       # 打包 NSIS 安装包 → dist/TorrentFlow-Setup-x.y.z.exe
+npm run release    # 打包 + 归整发版三件套 → dist-gh/
 ```
 
 > **踩坑提醒**：若命令行环境里设了 `ELECTRON_RUN_AS_NODE=1`，Electron 会退化成纯 Node 模式并报 `Cannot read properties of undefined (reading 'getPath')`。用 `env -u ELECTRON_RUN_AS_NODE npx electron .` 启动即可（置空 `ELECTRON_RUN_AS_NODE=` 无效，必须 `env -u`）。

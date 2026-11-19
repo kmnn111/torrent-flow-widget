@@ -257,7 +257,10 @@ function buildTrafficHourly(store, rangeKey, offset, downloaders) {
   const cfg = RANGES[rangeKey];
   const now = Math.floor(Date.now() / 1000);
   const dayShift = cfg.shift || 0;
-  const dayKey = tu.shiftDayKey(tu.dayKey(now), dayShift);
+  // 支持回看：offset 每 +1 往前推一天。此前完全忽略 offset，导致今日/昨日视图按 Alt+←/→ 毫无反应
+  const maxOffset = 30;
+  offset = Math.max(0, Math.min(maxOffset, Number(offset) || 0));
+  const dayKey = tu.shiftDayKey(tu.dayKey(now), dayShift - offset);
   const dayStart = tu.dayStartTs(dayKey);
   const step = 3600; // 1 小时一桶
   const buckets = [];
@@ -286,7 +289,7 @@ function buildTrafficHourly(store, rangeKey, offset, downloaders) {
     ok: true, range: rangeKey, metric: 'traffic', gran: 'hour',
     labels: buckets.map(b => b.label), times: buckets.map(b => b.ts),
     spans: buckets.map((b, i) => [b.ts, i < 23 ? buckets[i + 1].ts : b.ts + step]),
-    series, summary: sum, offset: 0, max_offset: 0, bucket_count: 24, at_latest: true,
+    series, summary: sum, offset, max_offset: maxOffset, bucket_count: 24, at_latest: offset === 0,
     window: { start: dayStart, end: dayStart + 24 * step, label: dayKey },
     downloaders: downloaders.map(d => ({ id: d.id, name: d.name, color_up: d.color_up, color_down: d.color_down }))
   };
