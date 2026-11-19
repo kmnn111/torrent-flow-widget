@@ -74,7 +74,7 @@
 
 ## 🆕 v1.0.3 · 正在下载 + PT 站点流量
 
-> **开发完成，待发布**：新增两个模块，并修正吸顶小窗的置顶语义。
+> **已发布（2026-11-19）**：到 [Releases](https://github.com/kmnn111/torrent-flow-widget/releases/latest) 下载 `TorrentFlow-Setup-1.0.3.exe`。旧版用户启动后会自动收到更新提醒。
 
 **新增：正在下载的种子**
 
