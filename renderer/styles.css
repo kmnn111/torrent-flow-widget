@@ -153,6 +153,11 @@ input, textarea, select, [contenteditable="true"] {
   opacity: 0; visibility: hidden; pointer-events: none;
   transition: opacity .2s ease, visibility 0s .2s;
 }
+/* 小窗收起态：所有独立覆盖层强制隐藏，杜绝大窗视图残留 */
+body.docked:not(.expanded) #settingsPanel,
+body.docked:not(.expanded) .modal-mask,
+body.docked:not(.expanded) .dd-menu,
+body.docked:not(.expanded) #tooltip { display: none !important; }
 /* 交互控件还原指针，避免 grab 光标出现在按钮上 */
 #widget button, #widget input, #widget select, #widget .dl-card { cursor: pointer; }
 /* 滚动期降载：透明窗上 backdrop-filter 每帧重采样桌面是掉帧与频闪的主因，

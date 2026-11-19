@@ -37,8 +37,7 @@ class Store {
       downloaders: [],
       settings: { poll_interval: 5, traffic_interval: 60, live_span: 300, tz_offset: 8, request_timeout: 5 },
       state: {}, hourly: {}, samples: [], traffic_samples: [], nextId: 1,
-      // 用户是否已明确接管配置。一旦用户增删过下载器就置 true，
-      // 之后即使删光也不会退回演示态（否则演示器会不断自动回注，表现为"删了又跳出来"）
+      // 演示数据功能已彻底移除。保留 demoOptedOut 仅为兼容旧数据读取，不再参与任何逻辑。
       demoOptedOut: false
     };
   }
@@ -111,7 +110,6 @@ class Store {
       row.color_down = row.color_down || p[1];
     }
     this.data.downloaders.push(row);
-    // 用户新增真实器 = 明确接管配置，从此不再自动回注演示数据
     this.data.demoOptedOut = true;
     this.save();
     return row;
@@ -132,27 +130,10 @@ class Store {
     if (i < 0) return false;
     this.data.downloaders.splice(i, 1);
     delete this.data.state[id]; delete this.data.hourly[id];
-    // 删除即视为接管配置：哪怕删光也保持"未配置"空态，绝不退回演示态
+    // 删除后保持"未配置"空态
     this.data.demoOptedOut = true;
     this.save();
     return true;
-  }
-  /**
-   * 主动恢复演示态（设置页"恢复演示数据"入口用）。
-   * 清掉真实器与其所有数据，复位接管标记，让 collector 下一轮重新注入演示器。
-   */
-  resetToDemo() {
-    const demoIds = new Set(this.data.downloaders.filter(d => d.demo).map(d => d.id));
-    this.data.downloaders = [];
-    for (const id of Object.keys(this.data.state)) {
-      if (!demoIds.has(Number(id))) delete this.data.state[id];
-    }
-    for (const id of Object.keys(this.data.hourly)) {
-      if (!demoIds.has(Number(id))) delete this.data.hourly[id];
-    }
-    this.data.demoOptedOut = false;
-    this.data.nextId = 1;
-    this.save();
   }
   reorderDownloaders(ids) {
     const map = new Map(ids.map((id, i) => [Number(id), i]));
@@ -244,11 +225,9 @@ class Store {
 
   /* ---------- 查询 ---------- */
   enabledIds() { return this.listDownloaders().filter(d => d.enabled).map(d => d.id); }
-  /** 显示用下载器列表：真实器存在时排除演示占位 */
+  /** 显示用下载器列表：只返回用户自己配置的真实下载器，演示数据已彻底移除 */
   displayDownloaders() {
-    const all = this.listDownloaders();
-    const real = all.filter(d => !d.demo);
-    return real.length ? real : all;
+    return this.listDownloaders().filter(d => !d.demo);
   }
 
   // 四周期汇总（按启用下载器）

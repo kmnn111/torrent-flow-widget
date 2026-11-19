@@ -29,7 +29,6 @@ contextBridge.exposeInMainWorld('flow', {
   dlAdd: (d) => ipcRenderer.invoke('dl:add', d),
   dlUpdate: (id, patch) => ipcRenderer.invoke('dl:update', id, patch),
   dlDelete: (id) => ipcRenderer.invoke('dl:delete', id),
-  dlResetDemo: () => ipcRenderer.invoke('dl:reset-demo'),
   dlReorder: (ids) => ipcRenderer.invoke('dl:reorder', ids),
   dlRecolor: () => ipcRenderer.invoke('dl:recolor'),
   dlTest: (d) => ipcRenderer.invoke('dl:test', d),

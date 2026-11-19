@@ -431,12 +431,6 @@
     });
     $('btnResetForm').addEventListener('click', resetForm);
     $('btnRecolor').addEventListener('click', async () => { await window.flow.dlRecolor(); refreshAll(false); });
-    $('btnResetDemo').addEventListener('click', async () => {
-      await window.flow.dlResetDemo();
-      resetForm();
-      await renderDlConfig();
-      await refreshAll(false);
-    });
     // 采集选项
     renderCollectOptions();
     $('btnSaveCollect').addEventListener('click', async () => {
@@ -491,7 +485,7 @@
       <span class="cname">${esc(d.name)}</span><span class="ctype">${d.type === 'tr' ? 'TR' : 'QB'}</span>
       <button data-act="edit">编辑</button><button data-act="del" class="del">删除</button>
     </div>`).join('') : '<p class="hint">暂无下载器。下方添加一个即可开始采集真实数据。</p>';
-    $('demoHint').textContent = list.length ? '' : '未配置下载器 · 可添加或恢复演示';
+    $('demoHint').textContent = list.length ? '' : '未配置下载器';
     box.querySelectorAll('.dl-config-row').forEach(row => {
       const id = Number(row.getAttribute('data-id'));
       row.querySelector('[data-act="edit"]').addEventListener('click', () => {
@@ -861,7 +855,7 @@
     const off = state.settings.motion === 'off';
     document.documentElement.classList.toggle('motion-off', off);
     if (state.settings.alwaysOnTop) $('btnPin').style.color = 'var(--sun-deep)';
-    $('panelVersion').textContent = 'v' + ((window.flow.version && window.flow.version()) || '1.0.1');
+    $('panelVersion').textContent = 'v' + ((window.flow.version && window.flow.version()) || '1.0.2');
     tickClock();
     if (!window.__clockTimer) window.__clockTimer = setInterval(tickClock, 1000);
     // 回到前台立刻补一次刷新，避免隐藏期间暂停刷新导致数据看起来是旧的
@@ -883,8 +877,16 @@
     window.flow.onDockState(s => {
       document.body.classList.toggle('docked', !!s.docked);
       document.body.classList.toggle('expanded', !!s.expanded);
-      $('pill').classList.toggle('show', !!s.docked && !s.expanded);
-      $('widget').classList.toggle('dock-hidden', !!s.docked && !s.expanded);
+      const collapsed = !!s.docked && !s.expanded;
+      $('pill').classList.toggle('show', collapsed);
+      $('widget').classList.toggle('dock-hidden', collapsed);
+      // 收起为小窗时必须关掉独立覆盖层，否则设置面板 / 详情弹窗会残留在小窗旁边
+      // （它们是 fixed 定位、挂在 #widget 之外，不受 dock-hidden 影响）
+      if (collapsed) {
+        closeSettings();
+        closeAllMenus();
+        $('detailModal').hidden = true;
+      }
       if (s.docked) {
         const pr = document.getElementById('rateChart');
         if (pr) pr.style.display = '';

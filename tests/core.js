@@ -9,6 +9,7 @@ const { Collector } = require('../core/collector.js');
 const chart = require('../core/chart.js');
 const tu = require('../core/timeutil.js');
 const clients = require('../core/clients.js');
+const { makeFixture } = require('./fixture.js');
 
 let pass = 0, fail = 0;
 function t(name, fn) {
@@ -35,15 +36,14 @@ t('小时对齐', () => {
   assert.strictEqual(h % 3600, 0);
 });
 
-console.log('\n[3] Store + 演示采集');
+console.log('\n[3] Store + 真实采集数据');
 const tmp = path.join(os.tmpdir(), 'ttm-probe-' + Date.now() + '.json');
-const store = new Store(tmp);
+const { store } = makeFixture(tmp);
 const collector = new Collector(store, () => {});
-t('演示模式识别', () => assert.strictEqual(collector.isDemo(), true));
-collector._demoRate(Math.floor(Date.now() / 1000));
-collector._demoTraffic(Math.floor(Date.now() / 1000));
-t('演示注入速率样本', () => assert.ok(store.data.samples.length > 0, 'samples empty'));
-t('演示注入小时桶', () => {
+t('演示数据功能已移除（恒非演示态）', () => assert.strictEqual(collector.isDemo(), false));
+t('有真实下载器', () => assert.ok(store.listDownloaders().length === 3));
+t('真实速率样本已写入', () => assert.ok(store.data.samples.length > 0, 'samples empty'));
+t('真实小时桶已写入', () => {
   const total = Object.values(store.data.hourly).reduce((a, m) => a + Object.keys(m).length, 0);
   assert.ok(total > 0, 'hourly empty');
 });

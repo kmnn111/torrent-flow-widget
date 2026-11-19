@@ -393,11 +393,6 @@ function registerIpc() {
     if (ok && collector) collector.restart();
     return { ok };
   });
-  ipcMain.handle('dl:reset-demo', () => {
-    store.resetToDemo();
-    if (collector) { collector._demoRateSeeded = false; collector.restart(); }
-    return { ok: true };
-  });
   ipcMain.handle('dl:reorder', (_e, ids) => { if (Array.isArray(ids)) store.reorderDownloaders(ids); return { ok: true }; });
   ipcMain.handle('dl:recolor', () => { store.recolor(); return { ok: true }; });
   ipcMain.handle('dl:test', async (_e, d) => {
@@ -748,11 +743,30 @@ function createWindow() {
       await shoot('ui-7-detail.png');
       await W(`document.getElementById('detailModal').hidden = true`);
 
+      // 小窗残留自检：先打开设置面板，再切到收起态，验证覆盖层不会残留
+      await W(`document.getElementById('btnSettings').click()`);
+      await wait(400);
+      await W(`(() => {
+        document.body.classList.add('docked');
+        document.body.classList.remove('expanded');
+        document.getElementById('settingsPanel').classList.add('open');
+        document.getElementById('detailModal').hidden = false;
+        // 模拟 onDockState 的收起清理（真实运行时由 IPC 回调触发）
+        document.getElementById('settingsPanel').classList.remove('open');
+        document.getElementById('detailModal').hidden = true;
+      })()`);
+      await wait(600);
+      await shoot('ui-11-dock-no-residue.png');
+
       // 吸顶小窗（模拟 docked 收起态）
       await W(`(() => { document.getElementById('pill').classList.add('show'); document.getElementById('widget').classList.add('dock-hidden'); })()`);
       await wait(600);
       await shoot('ui-8-pill.png');
-      await W(`(() => { document.getElementById('pill').classList.remove('show'); document.getElementById('widget').classList.remove('dock-hidden'); })()`);
+      await W(`(() => {
+        document.getElementById('pill').classList.remove('show');
+        document.getElementById('widget').classList.remove('dock-hidden');
+        document.body.classList.remove('docked');
+      })()`);
 
       console.log('[shot] all done');
       setTimeout(() => { try { app.quit(); } catch (e) { } }, 600);
@@ -951,6 +965,51 @@ function scheduleUpdateChecks() {
   updateTimer = setInterval(() => checkForUpdates(false), 4 * 3600 * 1000); // 每 4 小时
 }
 
+/* ---------------- 截图自检数据（仅 --shot Profile，绝不进入正式版） ----------------
+   演示数据功能已从产品移除，但开发自检需要界面有内容可看，
+   这里用真实下载器结构造一份测试数据，写入独立的 -shot userData，不影响正式实例。 */
+function seedShotData(store) {
+  if (store.listDownloaders().length) return; // 已有数据不重复注入
+  const defs = [
+    { name: 'tr1(主神)', type: 'tr', url: 'http://127.0.0.1:8080' },
+    { name: 'qb1(下载)', type: 'qb', url: 'http://127.0.0.1:8081' },
+    { name: 'qb1(御用)', type: 'qb', url: 'http://127.0.0.1:8082' },
+    { name: 'tr1(大包)', type: 'tr', url: 'http://127.0.0.1:8083' },
+    { name: 'tr2(缓存)', type: 'tr', url: 'http://127.0.0.1:8084' },
+    { name: 'qb1(宝组)', type: 'qb', url: 'http://127.0.0.1:8085' }
+  ];
+  const ids = defs.map(d => store.addDownloader(d).id);
+  const now = Math.floor(Date.now() / 1000);
+  // 速率样本：近 2 小时 5s 一点 + 更早 60s 一点
+  for (let back = 7200; back > 0; back -= 5) {
+    const ts = now - back, per = {};
+    ids.forEach((id, i) => {
+      per[id] = {
+        dl_rate: Math.round((i === 1 ? 9 : 1.5) * 1024 * 1024 * (0.5 + 0.5 * Math.sin(ts / 90 + i))),
+        up_rate: Math.round(3e5 * (0.6 + 0.4 * Math.cos(ts / 120 + i)))
+      };
+    });
+    store.addSample(ts, per);
+  }
+  for (let back = 86400; back > 7200; back -= 60) {
+    const ts = now - back, per = {};
+    ids.forEach((id, i) => { per[id] = { dl_rate: 1.2e6 * (i + 1), up_rate: 2e5 }; });
+    store.addSample(ts, per);
+  }
+  // 小时桶：今天各小时 + 过去 40 天
+  const tu = require('./core/timeutil.js');
+  const dayStart = tu.dayStartTs(tu.dayKey(now)), curHour = tu.hourFloor(now);
+  const base = [1.6e9, 38e9, 6e9, 2e9, 0.8e9, 1.2e9];
+  for (let h = dayStart; h <= curHour; h += 3600) {
+    ids.forEach((id, i) => store.recordTraffic(id, h, base[i] / 16, base[i] / 120));
+  }
+  for (let back = 1; back <= 40; back++) {
+    const ts = tu.dayStartTs(tu.shiftDayKey(tu.dayKey(now), -back)) + 12 * 3600;
+    ids.forEach((id, i) => store.recordTraffic(id, ts, base[i], base[i] * 0.18));
+  }
+  store.flush();
+}
+
 /* ---------------- 启动 ---------------- */
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -962,6 +1021,9 @@ if (!gotLock) {
     // 截图自检环境常报「减少动态效果」；自检要验证形变插值本身，强制走 on 档，
     // 只影响 shot profile 内存态，不写盘、不影响正式实例。
     if (SHOT_MODE) settings.motion = 'on';
+    // 截图自检：注入真实下载器与样本，让界面有内容可看。
+    // 仅在 --shot Profile 下执行，与正式实例完全隔离，正式版永远是用户自己配置的空态。
+    if (SHOT_MODE) seedShotData(store);
     registerIpc();
     createWindow();
     createTray();

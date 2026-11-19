@@ -50,14 +50,25 @@
 - ♻️ **刷新更聪明**：窗口隐藏 / 收起小窗时暂停整屏刷新，回到前台立即补刷；数据超 15 秒自动补一次
 - ⚡ 开机自启、窗口置顶、窗口位置与尺寸记忆
 
-### 🎭 演示数据
+### 🎬 干净的未配置空态
 
-- 未配置任何下载器时自动填充 6 台虚拟下载器，打开即有曲线、有柱子、有数值，先看清界面长什么样
-- 添加真实下载器后**自动清空**演示数据，不会和真实数据混在一起
+- 全新安装就是干净的未配置空态，**没有任何演示数据、虚拟下载器或假数值**
+- 空态界面明确提示"尚未配置下载器"并给出「去设置」入口
+- 只有你亲手添加的真实下载器才会出现，所有数字都来自实际采集
 
-## 🆕 v1.0.1 · 发版后修复
+## 🆕 v1.0.2 · 原创图标 + 演示数据移除
 
-> **已发布（2026-11-19）**：到 [Releases](https://github.com/kmnn111/torrent-flow-widget/releases/latest) 下载 `TorrentFlow-Setup-1.0.1.exe`。v1.0.0 用户启动后会自动收到更新提醒。
+> **已发布（2026-11-19）**：到 [Releases](https://github.com/kmnn111/torrent-flow-widget/releases/latest) 下载 `TorrentFlow-Setup-1.0.2.exe`。旧版用户启动后会自动收到更新提醒。
+
+- 🎨 **原创图标**：换掉从天气台借用的太阳云朵，改为原创的暖橙上升箭头（上传）+ 天蓝下降箭头（下载）+ 水彩波纹，与界面双色体系一致；生成器 `scripts/make-icon.py` 一并入库
+- 🚫 **演示数据彻底移除**：不再自动生成虚拟下载器，全新安装是干净的未配置空态；设置页移除了「恢复演示」入口；升级时自动清理历史遗留的演示占位数据
+- 🪟 **小窗残留修复**：收起为小窗时，设置面板 / 详情弹窗 / 下拉菜单现在会一起关闭，不再有"设置"字样残留在小窗旁边（覆盖层是 fixed 定位、挂在 #widget 之外，此前不受收起逻辑管）
+
+---
+
+## v1.0.1 · 发版后修复
+
+> 到 [Releases](https://github.com/kmnn111/torrent-flow-widget/releases/tag/v1.0.1) 查看 `TorrentFlow-Setup-1.0.1.exe`。
 
 **致命修复：真实下载器的流量统计此前完全失效**
 
@@ -149,7 +160,7 @@ git clone https://github.com/kmnn111/torrent-flow-widget.git
 cd torrent-flow-widget
 npm install        # 安装依赖
 npm start          # 开发运行
-npm test           # 60 项回归自检（核心 / 演示态边界 / 差分记账）
+npm test           # 60 项回归自检（核心 / 空态与删除边界 / 差分记账）
 npm run dist       # 打包 NSIS 安装包 → dist/TorrentFlow-Setup-x.y.z.exe
 npm run release    # 打包 + 归整发版三件套 → dist-gh/
 ```
@@ -192,7 +203,7 @@ torrent-flow-widget/
 │   ├── timeutil.js     # 时间分桶（固定偏移时区、周一为周起点）
 │   ├── store.js        # JSON 原子存储 + 小时桶 + 四周期聚合
 │   ├── clients.js      # qBittorrent / Transmission 客户端 + 差分记账
-│   ├── collector.js    # 双频采集调度 + 演示数据注入
+│   ├── collector.js    # 双频采集调度（只采真实下载器）
 │   └── chart.js        # 图表数据构建（速率 / 自然周期 / 全部）
 ├── renderer/
 │   ├── index.html
@@ -208,7 +219,7 @@ torrent-flow-widget/
 
 - **数据存放**：`%APPDATA%/流量台/traffic.json`。原子写入，损坏时自动备份为 `.broken` 并回退空数据。只存本机，不上传任何地方。
 - **小窗常驻**：吸顶小窗是「桌面部件」——平时钉在壁纸层上方、待在所有程序窗口后面，不遮挡浏览器等任何程序；「显示桌面」（Win+D）时随壁纸层一起浮出。打开「窗口置顶」开关则常驻最上层。
-- **演示数据**：卸载重装不会清空 `traffic.json`（`deleteAppDataOnUninstall: false`），历史流量不会丢。
+- **数据保留**：卸载重装不会清空 `traffic.json`（`deleteAppDataOnUninstall: false`），历史流量不会丢。
 - **采样保留**：实时采样默认保留 7 天（约 12 万点），上限 20 万点；小时桶长期保留不删。
 - **已知限制**：只支持 qBittorrent 和 Transmission，Deluge / rTorrent / µTorrent 未实现。
 - **调试自检**：`--shot` 为开发自检截图入口，日常使用无需关心。打包版用 `FLOW_SHOT=1` 环境变量触发（exe 直接传 `--shot` 会被 Chromium 命令行解析拦成 "bad option"）。
