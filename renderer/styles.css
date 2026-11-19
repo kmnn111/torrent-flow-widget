@@ -125,10 +125,20 @@ input, textarea, select, [contenteditable="true"] {
   background: linear-gradient(150deg, rgba(255,252,246,.72), rgba(224,240,252,.62));
   border: 1px solid rgba(255,255,255,.6); border-radius: 22px;
   box-shadow: inset 0 1px 0 rgba(255,255,255,.6), 0 14px 36px rgba(35,28,20,.2);
-  opacity: 0; visibility: hidden; transition: opacity .2s ease, visibility 0s;
+  /* 隐藏态：opacity 淡出跑完后才允许 visibility 归零。
+     原写法 transition 里的 visibility 延迟是 0s —— 类一移除就立刻 visibility:hidden，
+     淡出动画根本没有机会播放，观感就是「一下被切掉」。必须写 0s .18s。 */
+  opacity: 0; visibility: hidden;
+  transform: translateX(-50%) scale(.97);
+  transition: opacity .18s cubic-bezier(.32,.72,.28,1), transform .18s cubic-bezier(.32,.72,.28,1), visibility 0s .18s;
+  will-change: opacity, transform;
 }
 :root.night #pill { background: linear-gradient(150deg, rgba(34,48,68,.86), rgba(30,44,64,.84)); border-color: rgba(200,220,255,.2); }
-#pill.show { opacity: 1; visibility: visible; }
+/* 显示态：transform 回正、visibility 立即恢复（不能再有延迟，否则入场也要等 180ms） */
+#pill.show {
+  opacity: 1; visibility: visible; transform: translateX(-50%) scale(1);
+  transition: opacity .18s cubic-bezier(.32,.72,.28,1), transform .18s cubic-bezier(.32,.72,.28,1), visibility 0s;
+}
 .pill-grip { flex: none; width: 40px; height: 56px; display: grid; place-items: center; cursor: grab; }
 .pill-ico { font-size: 21px; color: var(--sun-deep); font-weight: 700; }
 .pill-mid { flex: none; min-width: 0; }
@@ -147,17 +157,58 @@ input, textarea, select, [contenteditable="true"] {
 
 /* 主内容滚动区 */
 #widget { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; padding: 14px 16px 20px;
-  scrollbar-width: none; -ms-overflow-style: none; overscroll-behavior: contain; cursor: grab; }
+  scrollbar-width: none; -ms-overflow-style: none; overscroll-behavior: contain; cursor: grab;
+  /* 基础态必须自带 transition：否则「收起 → 展开」时用的是基态（无过渡），
+     内容会瞬间蹦出来，只有「展开 → 收起」那一半有淡出 —— 这就是切换「不流畅」的来源。 */
+  transition: opacity .2s cubic-bezier(.32,.72,.28,1), transform .2s cubic-bezier(.32,.72,.28,1), visibility 0s; }
 #widget::-webkit-scrollbar, .panel-body::-webkit-scrollbar { width: 0; height: 0; display: none; }
 #widget.dock-hidden, body.docked:not(.expanded) #widget {
   opacity: 0; visibility: hidden; pointer-events: none;
-  transition: opacity .2s ease, visibility 0s .2s;
+  transform: translateY(-6px);
+  transition: opacity .2s cubic-bezier(.32,.72,.28,1), transform .2s cubic-bezier(.32,.72,.28,1), visibility 0s .2s;
 }
 /* 小窗收起态：所有独立覆盖层强制隐藏，杜绝大窗视图残留 */
 body.docked:not(.expanded) #settingsPanel,
 body.docked:not(.expanded) .modal-mask,
 body.docked:not(.expanded) .dd-menu,
 body.docked:not(.expanded) #tooltip { display: none !important; }
+
+/* ============ 收起态的形状收束（对齐天气台） ============
+   问题的本质：setShape 只能把窗口裁成「矩形」，而小窗视觉是圆角胶囊。
+   矩形四条边之外的区域虽然不渲染内容，但窗口本身仍在，于是：
+     · #frame::after 的 1px 描边 + inset 高光 → 在胶囊外面留一圈矩形亮线
+     · #pill 的 0 14px 36px 外投影 → 被矩形边界硬切成"方框"暗边
+   所以收起态必须：① 去掉外投影 ② 描边淡到 0 ③ 天空层裁成同款圆角。
+   三者缺一就会出现"圆角外还有透明矩形"的观感。 */
+
+/* ① #frame 的描边层：收起态整体淡出（小窗自己的描边由 #pill 负责） */
+body.docked:not(.expanded) #frame::after { opacity: 0; }
+
+/* ② 小窗：只留内高光，去掉会溢出成方框的外投影；贴边一侧不画描边 */
+body.docked:not(.expanded) #pill {
+  border-top-color: transparent;
+  box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.2);
+}
+:root.night body.docked:not(.expanded) #pill,
+body.night.docked:not(.expanded) #pill {
+  box-shadow: inset 0 -1px 0 rgba(210, 225, 250, 0.1);
+}
+
+/* ③ 天空层：裁剪成与小窗同款圆角矩形，圆弧外完全透明。
+   clip-path 可插值，配合已有的 clip-path 过渡，展开/收起是一条平滑曲线而不是硬切。
+   尺寸与 pillShapeRect() 严格对应：#pill 宽 300、高 64、圆角 22、水平居中。
+   公式 inset(上 右 下 左 round 圆角)：左右各收 (50% - 150px) 使可视宽度恰好 300px。 */
+body.docked:not(.expanded) #sky {
+  clip-path: inset(0 calc(50% - 150px) calc(100% - 64px) calc(50% - 150px) round 22px);
+}
+
+/* ④ 收起态点阵/星光层淡出，避免玻璃后面出现"残影"。
+   用 opacity + visibility 而非 display:none：切换过程平滑淡出，不硬切。 */
+body.docked:not(.expanded) #stars,
+body.docked:not(.expanded) .clouds {
+  opacity: 0 !important; visibility: hidden;
+  transition: opacity .2s ease, visibility 0s .2s;
+}
 /* 交互控件还原指针，避免 grab 光标出现在按钮上 */
 #widget button, #widget input, #widget select, #widget .dl-card { cursor: pointer; }
 /* 滚动期降载：透明窗上 backdrop-filter 每帧重采样桌面是掉帧与频闪的主因，
@@ -335,7 +386,21 @@ body.docked:not(.expanded) #tooltip { display: none !important; }
 .tooltip { position: fixed; z-index: 80; pointer-events: none; background: var(--paper-strong); border: 1px solid rgba(123,159,196,.3); border-radius: 9px; padding: 8px 10px; font-size: 11px; box-shadow: var(--shadow); line-height: 1.6; white-space: nowrap; max-height: 60vh; overflow: hidden; }
 
 /* ================= 正在下载的种子 ================= */
-.torrent-list { display: flex; flex-direction: column; gap: 9px; max-height: 232px; overflow-y: auto; overflow-x: hidden; }
+/* 与站点列表统一：隐藏滚动条（滚轮/拖拽即可滚动），边缘做上下渐隐提示可滚动 */
+.torrent-list { display: flex; flex-direction: column; gap: 9px; max-height: 232px;
+  overflow-y: auto; overflow-x: hidden; scrollbar-width: none; -ms-overflow-style: none;
+  overscroll-behavior: contain; }
+.torrent-list::-webkit-scrollbar { width: 0; height: 0; display: none; }
+/* 上下渐隐遮罩，与 .site-scroll 同款；at-top / at-end 由 JS 按滚动位置切换 */
+.torrent-list {
+  mask-image: linear-gradient(180deg, transparent 0, #000 10px, #000 calc(100% - 12px), transparent 100%);
+  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 10px, #000 calc(100% - 12px), transparent 100%);
+}
+.torrent-list.at-top { mask-image: linear-gradient(180deg, #000 0, #000 calc(100% - 12px), transparent 100%);
+  -webkit-mask-image: linear-gradient(180deg, #000 0, #000 calc(100% - 12px), transparent 100%); }
+.torrent-list.at-end { mask-image: linear-gradient(180deg, transparent 0, #000 10px, #000 100%);
+  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 10px, #000 100%); }
+.torrent-list.at-top.at-end { mask-image: none; -webkit-mask-image: none; }
 .tor-row { padding: 8px 10px; border-radius: 10px; background: color-mix(in srgb, var(--accent) 6%, transparent);
   border: 1px solid color-mix(in srgb, var(--accent) 14%, transparent); cursor: default; transition: background .16s, border-color .16s; }
 .tor-row:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); border-color: color-mix(in srgb, var(--accent) 26%, transparent); }
@@ -362,13 +427,37 @@ body.docked:not(.expanded) #tooltip { display: none !important; }
   font-family: inherit; transition: .15s; }
 .seg-btn:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .seg-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 700; }
-.site-list { display: flex; flex-direction: column; gap: 7px; max-height: 268px; overflow-y: auto; overflow-x: hidden; }
-.site-head { display: grid; grid-template-columns: 1fr 92px 92px; gap: 8px; font-size: 10px; color: var(--ink-soft);
-  padding: 0 2px 2px; border-bottom: 1px solid color-mix(in srgb, var(--accent) 16%, transparent); }
+/* 站点列表：模块内独立纵向滚动 —— 站点再多也不撑高窗口，列表区高度固定。
+   表头固定在滚动区外（不参与滚动），行数变化不会让表头上下跳。
+   渐隐遮罩提示「下面还有」，滚动到底自动消失（.at-end）。 */
+.site-box { display: flex; flex-direction: column; min-height: 0; }
+.site-scroll {
+  position: relative;
+  /* max-height 而非 height：站点少时面板自然收窄（不留大片空白），
+     站点多时封顶在约 8 行，超出的部分在模块内滚动查看。 */
+  max-height: 232px;
+  overflow-y: auto; overflow-x: hidden;
+  scrollbar-width: none; -ms-overflow-style: none;
+  overscroll-behavior: contain;        /* 滚到底不把滚动传导给外层 #widget */
+  cursor: grab;
+  /* 上下渐隐：视觉上暗示可滚动，边缘不硬切 */
+  mask-image: linear-gradient(180deg, transparent 0, #000 12px, #000 calc(100% - 14px), transparent 100%);
+  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 12px, #000 calc(100% - 14px), transparent 100%);
+}
+.site-scroll::-webkit-scrollbar { width: 0; height: 0; display: none; }
+.site-scroll:active { cursor: grabbing; }
+.site-scroll.at-top { mask-image: linear-gradient(180deg, #000 0, #000 calc(100% - 14px), transparent 100%);
+  -webkit-mask-image: linear-gradient(180deg, #000 0, #000 calc(100% - 14px), transparent 100%); }
+.site-scroll.at-end { mask-image: linear-gradient(180deg, transparent 0, #000 12px, #000 100%);
+  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 12px, #000 100%); }
+.site-scroll.at-top.at-end { mask-image: none; -webkit-mask-image: none; }
+.site-head { display: grid; grid-template-columns: 1fr 84px 84px; gap: 8px; font-size: 10px; color: var(--ink-soft);
+  padding: 0 2px 5px; border-bottom: 1px solid color-mix(in srgb, var(--accent) 16%, transparent); flex: none; }
 .site-head .sh-up, .site-head .sh-dl { text-align: right; }
-.site-row { display: grid; grid-template-columns: 1fr 92px 92px; gap: 8px; align-items: center;
-  padding: 5px 2px; border-radius: 8px; transition: background .15s; }
-.site-row:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.site-list { display: flex; flex-direction: column; gap: 4px; padding: 5px 2px 2px; }
+.site-row { display: grid; grid-template-columns: 1fr 84px 84px; gap: 8px; align-items: center;
+  padding: 3px 2px; border-radius: 8px; transition: background .15s; }
+.site-row:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .site-name { display: flex; align-items: center; gap: 5px; min-width: 0; }
 .site-name b { font-size: 12px; color: var(--ink); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .site-unknown { flex: none; font-style: normal; font-size: 9px; color: var(--ink-soft); opacity: .65;
@@ -388,6 +477,9 @@ body.docked:not(.expanded) #tooltip { display: none !important; }
 .site-total b { font-weight: 700; }
 .site-total b.u { color: var(--sun-deep); }
 .site-total b.d { color: var(--sky); }
+/* 「无站点」脚注：空字符串时自动塌陷（不占高度），有量时才出现 */
+.site-note { font-size: 10px; color: var(--ink-soft); text-align: right; padding-top: 3px; line-height: 1.4; }
+.site-note:empty { display: none; }
 
 /* 减少动效（用户显式关闭时） */
 :root.motion-off *, :root.motion-off *::before, :root.motion-off *::after { animation: none !important; transition: none !important; }

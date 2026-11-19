@@ -161,5 +161,64 @@ console.log('\n[8] 站点汇总不串站、按流量排序');
   try { fs.unlinkSync(p); } catch (e) { }
 }
 
+console.log('\n[9] 无 tracker 种子不得污染的「未知站点」');
+{
+  // 回归：此前 collector 用 identify('') 兜底，返回 key=''，
+  // 于是所有无 tracker 种子的流量都并进同一个空 key 的假站点，
+  // 真实数据里它占了今日 424GB↑/1003GB↓，还把真正的未知站一起吞掉。
+  const empty = sites.identify('');
+  ok('空输入的 key 不含内容', empty.key === '', JSON.stringify(empty.key));
+  ok('空输入标记为未知', empty.known === false, empty.known);
+
+  // collector 现在用专用 key 区分，两者必须是不同的 key
+  const NO_SITE_KEY = 'no-site';
+  ok('无站点 key 非空', !!NO_SITE_KEY && NO_SITE_KEY !== '');
+  ok('无站点 key 与空 key 不同', NO_SITE_KEY !== empty.key);
+
+  // 未收录但有域名的站，key 基于域名，稳定且非空
+  const unk = sites.identify('tracker.never-heard-of-this-pt.net');
+  ok('未收录域名有非空 key', !!unk.key && unk.key.startsWith('host:'), unk.key);
+  ok('未收录域名不等于无站点 key', unk.key !== NO_SITE_KEY, unk.key);
+  ok('同一未收录域名 key 稳定', sites.identify('tracker.never-heard-of-this-pt.net').key === unk.key);
+}
+
+console.log('\n[10] 空 key 幽灵站点：拒收 + 历史迁移');
+{
+  // 写入层拒收空 key
+  const p1 = path.join(os.tmpdir(), 'ttm-sites-empty-' + Date.now() + '.json');
+  const s1 = new Store(p1);
+  const t = Math.floor(Date.now() / 1000) - 120;
+  s1.recordSiteTraffic(t, { '': { up: 0, dl: 0, name: '未知站点', known: false } });
+  s1.recordSiteTraffic(t + 60, { '': { up: 1000, dl: 2000, name: '未知站点', known: false } });
+  ok('空 key 不建元信息', !s1.data.site_meta['']);
+  ok('空 key 不记账', Object.keys(s1.data.site_hourly || {}).every(k => k !== ''));
+  ok('空 key 不进汇总', s1.siteTotals().every(r => r.key !== ''));
+  try { fs.unlinkSync(p1); } catch (e) { }
+
+  // 历史文件里已有的空 key 在 load 时被迁移进 no-site，量不丢
+  const p2 = path.join(os.tmpdir(), 'ttm-sites-mig-' + Date.now() + '.json');
+  fs.writeFileSync(p2, JSON.stringify({
+    site_meta: { '': { name: '未知站点', known: false, last_seen: 1 },
+                 abc: { name: '彩虹岛', known: true, last_seen: 2 } },
+    site_base: { '': { up: 9e10, dl: 9e10 }, abc: { up: 5, dl: 6 } },
+    site_hourly: { '': { '1700000000': { day: '2026-11-18', week: 'w', month: 'm', year: 'y', dl_bytes: 300, up_bytes: 100 } },
+                   abc: { '1700000000': { day: '2026-11-18', week: 'w', month: 'm', year: 'y', dl_bytes: 7, up_bytes: 3 } } }
+  }));
+  const s2 = new Store(p2);
+  ok('迁移后空 key 元信息已删', !s2.data.site_meta['']);
+  ok('迁移后空 key 基线已删', !s2.data.site_base['']);
+  ok('迁移后空 key 小时桶已删', !s2.data.site_hourly['']);
+  ok('迁移建立 no-site 元信息', s2.data.site_meta['no-site'] && s2.data.site_meta['no-site'].name === '无站点');
+  ok('空 key 的量并入 no-site（未丢账）',
+    s2.data.site_hourly['no-site']['1700000000'].dl_bytes === 300 &&
+    s2.data.site_hourly['no-site']['1700000000'].up_bytes === 100,
+    s2.data.site_hourly['no-site']);
+  ok('正常站点不受迁移影响', s2.data.site_meta['abc'].name === '彩虹岛');
+  const rows2 = s2.siteTotals();
+  ok('迁移后汇总含 no-site 与彩虹岛', rows2.length === 2 &&
+    rows2.some(r => r.key === 'no-site') && rows2.some(r => r.key === 'abc'), rows2.map(r => r.key));
+  try { fs.unlinkSync(p2); } catch (e) { }
+}
+
 console.log(`\n=== ${pass} PASS / ${fail} FAIL ===\n`);
 process.exit(fail ? 1 : 0);

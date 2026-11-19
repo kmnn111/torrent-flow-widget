@@ -334,6 +334,9 @@
   window.__flowLoadChart = loadChart;
   window.__flowDrawRate = drawRate;
   window.__flowDrawTraffic = drawTraffic;
+  // 自检钩子：--shot 下注入下载中种子后需要手动重渲染（模块内函数无法从外部调用）
+  window.__flowRenderActive = renderActiveTorrents;
+  window.__flowRenderSites = renderSites;
 
   /* ================= 下拉交互 ================= */
   function bindDropdown(triggerId, menuId, options, current, onSelect) {
@@ -627,6 +630,8 @@
     const box = $('torrentList'); if (!box) return;
     const d = state.activeTorrents || { list: [], total_up_rate: 0 };
     const list = d.list || [];
+    // 与站点列表同理：全量重建会把滚动位置归零，翻到一半被弹回顶部。
+    const keepTop = box.scrollTop;
     if (!list.length) {
       $('torrentSub').textContent = '';
       box.innerHTML = `<div class="empty-line">当前没有正在下载的种子</div>`;
@@ -636,7 +641,9 @@
     $('torrentSub').textContent = `${list.length} 个 · ${fmtRate(sumRate)}`;
     box.innerHTML = list.map(t => {
       const pct = Math.max(0, Math.min(100, (t.progress || 0) * 100));
-      const site = t.site && t.site !== '未知站点' ? `<span class="tor-site">${esc(t.site)}</span>` : '';
+      // 站点标记：无站点的种子（本机/私有种子）和未识别站不显示标签，避免噪声
+      const site = t.site && t.site !== '未知站点' && t.site !== '无站点'
+        ? `<span class="tor-site">${esc(t.site)}</span>` : '';
       const speed = t.dl_rate > 0 ? `<span class="tor-speed">↓${fmtRate(t.dl_rate)}</span>` : `<span class="tor-speed idle">${esc(STATE_TEXT[t.state] || '—')}</span>`;
       return `<div class="tor-row" title="${esc(t.name)}">
         <div class="tor-head">
@@ -652,6 +659,8 @@
         </div>
       </div>`;
     }).join('');
+    if (keepTop > 0) box.scrollTop = keepTop;
+    if (window.__syncTorMask) window.__syncTorMask();
   }
 
   /* ================= PT 站点流量 ================= */
@@ -667,8 +676,23 @@
     const d = state.siteData || { sites: [] };
     const all = d.sites || [];
     const p = state.sitePeriod || 'day';
-    // 只显示该周期有流量的站，避免几十行全 0 稀释信息
-    const rows = all.filter(s => (s[p] && (s[p].up + s[p].dl)) > 0);
+    // 列出所有「有种子」的站，而不是只列该周期有流量的站。
+    // 之前的过滤会让今日只显示 5~7 个，用户以为漏统计了 —— 实际上大部分站
+    // 只是今天还没产生流量。全列出来才看得到完整版图，0 流量的沉到底部。
+    // 排序：本周期有流量的按流量降序在前，其余按累计流量降序在后。
+    const trafficOf = s => (s[p] ? s[p].up + s[p].dl : 0);
+    // 「无站点」（本机做种/私有种子，没有 tracker）不是 PT 站，不能参与站点排行：
+    // 它的量级往往最大（真实数据里曾占今日 0.41T↑/0.98T↓），会把真正的站挤到下面。
+    // 单独挑出来放到列表末尾，卡片脚注里再提示，既不失真也不干扰排行。
+    const isNoSite = s => s.key === 'no-site';
+    const noSiteRow = all.find(isNoSite) || null;
+    const ptRows = all.filter(s => !isNoSite(s));
+    const rows = ptRows.slice().sort((a, b) => {
+      const ta = trafficOf(a) > 0, tb = trafficOf(b) > 0;
+      if (ta !== tb) return ta ? -1 : 1;                 // 有流量的优先
+      if (ta && tb) return trafficOf(b) - trafficOf(a);  // 都有的按本周期流量降序
+      return (b.all.up + b.all.dl) - (a.all.up + a.all.dl); // 都没有的按累计降序
+    });
     // 段选按钮高亮
     for (const id of ['sitePeriodDay', 'sitePeriodWeek', 'sitePeriodAll']) {
       const el = $(id); if (!el) continue;
@@ -676,22 +700,37 @@
     }
     if (!rows.length) {
       $('siteSub').textContent = '';
+      $('siteTotUp').textContent = '↑0';
+      $('siteTotDl').textContent = '↓0';
+      $('siteNote').textContent = '';
       const empty = p === 'day' ? '今日还没有站点流量' : (p === 'week' ? '本周还没有站点流量' : '还没有累计站点流量');
       box.innerHTML = `<div class="empty-line">${empty}</div>`;
+      syncSiteScrollMask();
       return;
     }
-    const tot = rows.reduce((a, s) => ({ up: a.up + s[p].up, dl: a.dl + s[p].dl }), { up: 0, dl: 0 });
+    const tot = rows.reduce((a, s) => ({ up: a.up + (s[p].up || 0), dl: a.dl + (s[p].dl || 0) }), { up: 0, dl: 0 });
+    // 全部渲染，靠 .site-scroll 的模块内滚动查看其余站点 —— 不靠折叠、也不撑高窗口
     $('siteSub').textContent = `${rows.length} 站`;
+    // 「无站点」的量单独提示，不混进站点合计（否则用户以为某站偷跑）
+    const nUp = noSiteRow ? (noSiteRow[p].up || 0) : 0;
+    const nDl = noSiteRow ? (noSiteRow[p].dl || 0) : 0;
+    $('siteTotUp').textContent = '↑' + fmtBytes(tot.up);
+    $('siteTotDl').textContent = '↓' + fmtBytes(tot.dl);
+    $('siteNote').textContent = (nUp + nDl) > 0
+      ? `另有本机/私有种子 ↑${fmtBytes(nUp)} ↓${fmtBytes(nDl)}，不计入站点`
+      : '';
     const max = Math.max(...rows.map(s => Math.max(s[p].up, s[p].dl)), 1);
-    let html = `<div class="site-head">
-      <span class="sh-name">站点</span>
-      <span class="sh-up">上传</span>
-      <span class="sh-dl">下载</span>
-    </div>`;
-    html += rows.map(s => {
-      const upW = (s[p].up / max * 100).toFixed(1);
-      const dlW = (s[p].dl / max * 100).toFixed(1);
-      const title = s.full ? `${s.full}${s.host ? ' · ' + s.host : ''}` : (s.host || s.name);
+    // 全量重建会让滚动位置归零：用户正在往下翻站点时，每 30s 一次的数据刷新
+    // 都把他弹回顶部，等于这个列表没法翻。重建前后保存/恢复滚动偏移。
+    const sc = $('siteScroll');
+    const keepTop = sc ? sc.scrollTop : 0;
+    box.innerHTML = rows.map(s => {
+      const upW = Math.min(100, (s[p].up / max * 100)).toFixed(1);
+      const dlW = Math.min(100, (s[p].dl / max * 100)).toFixed(1);
+      // 未收录站优先显示域名本身（name 已是域名），title 给出完整域名便于排查收录
+      const title = s.known
+        ? (s.full ? `${s.full}${s.host ? ' · ' + s.host : ''}` : (s.host || s.name))
+        : `${s.host || s.name} · 未收录，可加入 sites.js 规则`;
       return `<div class="site-row" title="${esc(title)}">
         <div class="site-name">
           <b>${esc(s.name)}</b>
@@ -703,12 +742,16 @@
         </div>
       </div>`;
     }).join('');
-    html += `<div class="site-total">
-      <span>合计</span>
-      <b class="u">↑${fmtBytes(tot.up)}</b>
-      <b class="d">↓${fmtBytes(tot.dl)}</b>
-    </div>`;
-    box.innerHTML = html;
+    if (sc && keepTop > 0) sc.scrollTop = keepTop;
+    syncSiteScrollMask();
+  }
+  /* 滚动区上下渐隐遮罩状态：到顶去掉顶部渐隐、到底去掉底部渐隐，
+     内容不够长（无滚动）时两边都不要，避免短列表上下发灰。 */
+  function syncSiteScrollMask() {
+    const sc = $('siteScroll'); if (!sc) return;
+    const max = sc.scrollHeight - sc.clientHeight;
+    sc.classList.toggle('at-top', sc.scrollTop <= 1);
+    sc.classList.toggle('at-end', max <= 1 || sc.scrollTop >= max - 1);
   }
 
   /* ================= 托盘信息 ================= */
@@ -734,11 +777,15 @@
     clearTimeout(el._scrollEndTimer);
     el._scrollEndTimer = setTimeout(() => el.classList.remove('scrolling'), 180);
   }
-  function initSmoothScroll(el) {
+  function initSmoothScroll(el, opts) {
     if (!el) return;
+    const o = opts || {};
+    const outer = o.chainOuter || null;   // 滚到边界时把滚轮交给外层容器
     let target = el.scrollTop, animating = false, raf = 0, selfTop = -1, lastStep = 0;
     const EASE = 0.18;
     const maxTop = () => Math.max(0, el.scrollHeight - el.clientHeight);
+    // 边界判断留 1px 容差：分数滚动位置下 scrollTop 很难精确等于 maxTop
+    const atEdge = dir => dir > 0 ? el.scrollTop >= maxTop() - 1 : el.scrollTop <= 1;
 
     function step(now) {
       raf = 0;
@@ -769,6 +816,12 @@
       if (e.ctrlKey) return;
       if (e.target.closest && e.target.closest('.chart-viewport')) return;
       if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+      // 只有自己已经滚到边界，才把滚轮让给外层；否则内层吃掉滚动，用户
+      // 鼠标停在列表上时整页就滚不动了。交还时不动 preventDefault。
+      if (outer && atEdge(e.deltaY)) return;
+      // 内层消费了滚轮就必须截断冒泡：外层 #widget 也挂了同一套 handler，
+      // 不截断会两层同时滚动 —— 观感是"列表在跑、整页也在跑"，非常飘。
+      e.stopPropagation();
       e.preventDefault();
       const raw = e.deltaY * (e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? el.clientHeight : 1);
       // 一格 120px 直接跳太猛：0.55 缩放 + 72px 封顶 ≈ 一格 66px（约 3 行）
@@ -797,10 +850,21 @@
      方向锁避免与窗口拖拽打架，交互控件豁免。 */
   function initDragScrollY(el) {
     if (!el) return;
+    // 嵌套滚动区冲突：外层 #widget 与内层 .site-scroll 都监听 window 的 mousemove，
+    // 事件会冒泡，两层会同时被拖。mousedown 阶段就把「本次拖拽归谁」定下来：
+    // 若按下点落在带 data-scroll-self 的内层里，外层直接不接管。
+    const claimedByInner = e => {
+      if (!el.dataset || !el.dataset.scrollSelf) {
+        const inner = e.target.closest && e.target.closest('[data-scroll-self]');
+        if (inner && inner !== el) return true;
+      }
+      return false;
+    };
     let down = false, axis = '', startX = 0, startY = 0, startTop = 0, lastY = 0, lastT = 0, vel = 0, raf = 0, moved = false;
     const stopInertia = () => { if (raf) { cancelAnimationFrame(raf); raf = 0; } };
     el.addEventListener('mousedown', e => {
       if (e.button !== 0) return;
+      if (claimedByInner(e)) return;
       const r = el.getBoundingClientRect(), cs = getComputedStyle(el);
       const bl = parseFloat(cs.borderLeftWidth) || 0, bt = parseFloat(cs.borderTopWidth) || 0;
       if (e.clientX - r.left - bl >= el.clientWidth || e.clientY - r.top - bt >= el.clientHeight) return;
@@ -985,6 +1049,28 @@
     initSmoothScroll($('widget'));
     initSmoothScroll(document.querySelector('.panel-body'));
     initDragScrollY($('widget'));
+    // PT 站点模块的独立滚动区：同样上惯性滚动 + 拖拽滚屏，手感与外层一致。
+    // 滚到顶/底时把滚轮交回外层 #widget —— 否则鼠标停在列表上就再也滚不动整页。
+    initSmoothScroll($('siteScroll'), { chainOuter: $('widget'), maskTarget: $('siteScroll') });
+    initDragScrollY($('siteScroll'));
+    syncSiteScrollMask();
+    if ($('siteScroll')) $('siteScroll').addEventListener('scroll', syncSiteScrollMask, { passive: true });
+    // 「正在下载」列表同样是限高滚动区，一并接管，否则只有它一格一格顿着滚。
+    const torList = $('torrentList');
+    if (torList) {
+      torList.setAttribute('data-scroll-self', '1');
+      initSmoothScroll(torList, { chainOuter: $('widget') });
+      initDragScrollY(torList);
+      // 渐隐遮罩状态：与站点列表同一套逻辑（到顶/到底各去掉一侧）
+      const syncTorMask = () => {
+        const max = torList.scrollHeight - torList.clientHeight;
+        torList.classList.toggle('at-top', torList.scrollTop <= 1);
+        torList.classList.toggle('at-end', max <= 1 || torList.scrollTop >= max - 1);
+      };
+      window.__syncTorMask = syncTorMask;
+      torList.addEventListener('scroll', syncTorMask, { passive: true });
+      syncTorMask();
+    }
     bindChartHover('rateChart', 'rate');
     bindChartHover('trafficChart', 'traffic');
     await refreshAll(false);

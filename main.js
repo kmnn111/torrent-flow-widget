@@ -278,8 +278,11 @@ function undockWindow() {
 }
 function expandDock() {
   if (!win || win.isDestroyed()) return;
+  if (dockExpanded) return;
   dockExpanded = true;
-  setShapeFull();          // 先放开整个窗口，再由 CSS 淡入
+  // 展开与收起严格镜像：先放开窗口形状（否则鼠标只能在 300×64 内活动，
+  // 大窗一出现就点不到卡片），再让 CSS 淡入。两步同一帧完成，视觉上是一次连续动作。
+  setShapeFull();
   sendDockState();
   ensureHoverPoll();
 }
@@ -287,18 +290,28 @@ function collapseDock() {
   if (!win || win.isDestroyed()) return;
   dockExpanded = false;
   hoverArmed = false;
-  sendDockState();         // CSS 先淡出 + 天空层形变收进小窗
-  setTimeout(() => {       // 淡出/形变（~240ms）完成后再裁剪形状，避免内容突然消失
+  if (!settings.docked) return;
+  // 两阶段（与天气台一致）：
+  //  ① 先让渲染层开始形变 —— 天空层 clip-path 收成胶囊、#widget 淡出、外圈描边淡到 0、
+  //     小窗淡入。此时窗口仍是完整矩形，但矩形内除了胶囊全是透明像素，屏幕上看不出边界。
+  //  ② 形变跑完（240ms）再 setShape 裁剪。提前裁会把淡出动画连内容一起切掉，观感是硬切。
+  // 早先「大窗外圈残留」的真正原因是阶段①缺了 CSS：天空渐变仍然是整块矩形（不透明），
+  // #frame 的 1px 描边还在，于是 260ms 里露出一圈方框。CSS 补齐后这个顺序才是既无残影又顺滑的。
+  sendDockState();
+  setTimeout(() => {
     if (!win || win.isDestroyed() || !settings.docked || dockExpanded) return;
     // 小窗按大窗平移后的位置对位：x 跟随大窗中心、y 贴回顶边（吸顶归位），并固化位置记忆
     const b = win.getBounds();
     const wa = screen.getDisplayMatching(b).workArea;
     const px = clamp(Math.round(b.x + baseSize.w / 2 - PILL_W / 2), wa.x, wa.x + wa.width - PILL_W);
     const nx = px - Math.round((baseSize.w - PILL_W) / 2);
-    if (nx !== b.x || b.y !== wa.y) setBoundsSafe({ x: nx, y: wa.y, width: baseSize.w, height: baseSize.h });
+    if (nx !== b.x || b.y !== wa.y || b.width !== baseSize.w || b.height !== baseSize.h) {
+      setBoundsSafe({ x: nx, y: wa.y, width: baseSize.w, height: baseSize.h });
+    }
     if (px !== settings.dockX) { settings.dockX = px; persist({ dockX: px }); }
     setShapePill();
-  }, 260);
+    ensureHoverPoll();
+  }, 240);
   ensureHoverPoll();
 }
 /* 拖拽结束：距顶端够近 → 吸顶收起；吸顶态拖离 → 恢复完整插件 */
@@ -719,6 +732,46 @@ function createWindow() {
       await shoot('ui-10-hover.png');
       await W(`document.getElementById('rateChart').parentElement.dispatchEvent(new MouseEvent('mouseleave', { bubbles: false }))`);
 
+      // 下载中种子列表自检：真实环境里没有正在下载的种子时这一块永远是空态，
+      // 无法验证「名称省略 + 悬停全名 + 独立滚动」。这里注入 12 个下载中的种子，
+      // 只在 shot 模式注入，不影响正式数据。
+      await W(`(() => {
+        const s = window.__flowState;
+        const mk = (i) => ({
+          id: 'd1', dl_name: '绿联NAS', hash: 'h' + i,
+          name: '[电影] 沙丘2.Dune.Part.Two.2024.2160p.UHD.BluRay.REMUX.HDR.HEVC.TrueHD.7.1.Atmos-' + i + '.mkv',
+          progress: Math.min(0.98, 0.12 + i * 0.07), size: 68719476736,
+          amount_left: Math.round(68719476736 * (1 - Math.min(0.98, 0.12 + i * 0.07))),
+          dl_rate: Math.round((9 - i * 0.6) * 1024 * 1024), up_rate: 120000,
+          eta: 600 + i * 300, state: 'downloading',
+          site: i % 3 === 0 ? '彩虹岛' : (i % 3 === 1 ? '馒头' : '春天'), site_key: 'k' + i
+        });
+        s.activeTorrents = { at: Math.floor(Date.now() / 1000), total_up_rate: 0, list: Array.from({ length: 12 }, (_, i) => mk(i)) };
+        return true;
+      })()`);
+      await wait(200);
+      // 触发一次渲染（loadActiveTorrents 是模块内函数，用数据事件同款入口）
+      await W(`(() => { if (window.__flowRenderActive) window.__flowRenderActive(); return true; })()`);
+      await wait(400);
+      await W(`document.getElementById('widget').scrollTop = 99999`);
+      await wait(600);
+      await shoot('ui-13-torrents.png');
+      const torProbe = await W(`(() => {
+        const box = document.getElementById('torrentList');
+        const rows = box.querySelectorAll('.tor-row');
+        const first = rows[0];
+        return {
+          rows: rows.length,
+          nameText: first ? first.querySelector('.tor-name').textContent : '',
+          hasFullTitle: first ? (first.getAttribute('title') || '').length > 40 : false,
+          scrollH: box.scrollHeight, clientH: box.clientHeight,
+          scrollable: box.scrollHeight > box.clientHeight + 2,
+          hasSelfFlag: box.hasAttribute('data-scroll-self')
+        };
+      })()`);
+      console.log('[torrent-test] ' + JSON.stringify(torProbe));
+      console.log('[torrent-test] ' + (torProbe.rows === 12 && torProbe.hasFullTitle && torProbe.scrollable && torProbe.hasSelfFlag ? 'PASS' : 'FAIL'));
+
       // 滚到底部：流量统计图完整可见
       await W(`document.getElementById('widget').scrollTop = 99999`);
       await wait(700);
@@ -786,6 +839,82 @@ function createWindow() {
       })()`);
       await wait(600);
       await shoot('ui-11-dock-no-residue.png');
+
+      // 形变中间帧自检：收起过程 240ms 内窗口仍是完整矩形，
+      // 此刻最容易露出「空矩形外框」——必须在形变跑到一半时抓一帧确认边界已透明，
+      // 否则用户看到的就是「大窗外圈残留一会再消失」。
+      //
+      // 采样与截图必须分成两步：capturePage 本身要占用若干帧，
+      // 在同一步里截屏会把 rAF 采样打断（实测 frames 只剩 3、distinct=1 的假失败）。
+      const morphJs = `(() => {
+        window.__morph = [];
+        document.body.classList.remove('docked');
+        document.getElementById('widget').classList.remove('dock-hidden');
+        document.getElementById('pill').classList.remove('show');
+        return true;
+      })()`;
+      // ① 先复位到大窗态，等复位过渡彻底跑完
+      await W(morphJs);
+      await wait(400);
+      // ② 纯采样：在页面内用 Promise 等采样窗口跑完再返回。
+      // 不能"发起采样 → 外部 setTimeout → 回读"：executeJavaScript 一返回，
+      // 采样循环可能还没起跑，回读时数组仍是空的（实测 frames=0 假失败）。
+      // 另加 setInterval 兜底：rAF 被长任务饿死时也能保证帧密度。
+      //
+      // 采集首轮（真实数据要连 qB 拉几百个种子的 tracker）会长时间霸占主线程，
+      // 若正好撞上采样窗口，rAF 一帧都跑不出来（实测 frames=1 假失败）。
+      // 所以按 settle→采样 的顺序重试，最多 3 轮，任一轮通过即算通过。
+      const runMorphOnce = () => W(`(() => {
+        const sky = document.getElementById('sky');
+        return new Promise(r => {
+          const s = [];
+          const t0 = performance.now();
+          const push = () => {
+            const t = performance.now() - t0;
+            if (t < 800) s.push(getComputedStyle(sky).clipPath);
+          };
+          const tick = () => { push(); if (performance.now() - t0 < 800) requestAnimationFrame(tick); };
+          requestAnimationFrame(tick);
+          const iv = setInterval(push, 40);
+          // 采样起跑后再触发形变，保证首帧记录的是大窗态
+          setTimeout(() => {
+            document.getElementById('pill').classList.add('show');
+            document.body.classList.add('docked');
+            document.body.classList.remove('expanded');
+            document.getElementById('widget').classList.add('dock-hidden');
+          }, 60);
+          setTimeout(() => { clearInterval(iv); r(s); }, 850);
+        });
+      })()`);
+      let morph = [], uniq = new Set(), settledOk = false, tries = 0;
+      for (; tries < 3; tries++) {
+        await W(morphJs);            // 复位大窗态
+        await wait(450);
+        const raw = await runMorphOnce();
+        morph = Array.isArray(raw) ? raw : [];
+        uniq = new Set(morph);
+        await wait(350);
+        const settled = String(await W(`getComputedStyle(document.getElementById('sky')).clipPath`)).replace(/^"|"$/g, '');
+        settledOk = /100% - 64px|64px/.test(settled);
+        if (uniq.size >= 3 && settledOk) break;   // 通过即退出
+        await wait(400);                           // 让主线程喘口气再试
+      }
+      console.log('[morph] frames=' + morph.length + ' distinct=' + uniq.size +
+        ' settled=' + settledOk + ' tries=' + (tries + 1));
+      console.log('[morph] ' + (uniq.size >= 3 && settledOk ? 'PASS 有插值过渡' : 'FAIL 硬切'));
+
+      // ③ 单独再跑一次形变，在跑到一半时截图看有没有矩形残影
+      await W(morphJs);
+      await wait(400);
+      await W(`(() => {
+        document.getElementById('pill').classList.add('show');
+        document.body.classList.add('docked');
+        document.body.classList.remove('expanded');
+        document.getElementById('widget').classList.add('dock-hidden');
+        return true;
+      })()`);
+      await wait(100);                       // 形变跑到约 40%
+      await shoot('ui-12-morph-mid.png');
 
       // 吸顶小窗（模拟 docked 收起态）
       await W(`(() => { document.getElementById('pill').classList.add('show'); document.getElementById('widget').classList.add('dock-hidden'); })()`);
@@ -1036,7 +1165,53 @@ function seedShotData(store) {
     const ts = tu.dayStartTs(tu.shiftDayKey(tu.dayKey(now), -back)) + 12 * 3600;
     ids.forEach((id, i) => store.recordTraffic(id, ts, base[i], base[i] * 0.18));
   }
+  seedShotSites(store, now);
   store.flush();
+}
+
+/* 站点自检数据：23 站（与真实环境同规模），今日只有前 4 站有流量 ——
+   正是这个分布暴露了「只显示 5 站」的过滤 bug，也让滚动区的大小能被真实检验。 */
+function seedShotSites(store, now) {
+  const names = [
+    ['天空', 0.32, 0.63], ['我堡', 0.06, 0.15], ['春天', 0.01, 0.11], ['观众', 0.01, 0.03],
+    ['蟹', .0008, .002], ['AGSV', .0006, .0015], ['彩虹岛', .0005, .0012], ['未知站点', .0004, .0009],
+    ['馒头', .003, .008], ['憨憨', .0025, .006], ['套套哥', .002, .005], ['CS', .0018, .004],
+    ['SunnyTK', .0016, .0035], ['猫站', .0014, .003], ['朋友', .0012, .0028], ['青蛙', .001, .0025],
+    ['家园', .0009, .0022], ['熊猫', .0008, .002], ['苦咖啡', .0007, .0018], ['视界', .0006, .0016],
+    ['猪猪', .0005, .0014], ['杜比', .0004, .0012], ['你堡', .0003, .001]
+  ];
+  const TB = Math.pow(1024, 4);
+  // 用数组而非以 key 为下标的对象：后续各轮都按序号索引，避免 key/下标混用
+  const perSite = names.map(([name, upT, dlT], i) => ({
+    key: 'shot-site-' + i, name,
+    up: Math.round(upT * TB), dl: Math.round(dlT * TB),
+    today: i < 4
+  }));
+  // recordSiteTraffic 的语义是真值差分：调用方每轮上报「站点累计量」，
+  // 由它自己算增量。所以这里要模拟「上一轮基线 → 本轮增长」的两次上报，
+  // 且基线必须从 0 起（否则首次上报会被当成基线，不产生任何记账）。
+  // 每轮都要带 name/full/host：站点元信息随上报更新，缺字段会被当成"改名"。
+  const phase = (ts, fn) => {
+    const payload = {};
+    perSite.forEach(s => {
+      const v = fn(s);
+      payload[s.key] = {
+        up: v.up, dl: v.dl, name: s.name,
+        full: s.name === '未知站点' ? '' : s.name,
+        host: 'tracker.site' + perSite.indexOf(s) + '.net',
+        known: s.name !== '未知站点'
+      };
+    });
+    store.recordSiteTraffic(ts, payload);
+  };
+  // 轮 1：全部 0（建基线）
+  phase(now - 6 * 86400, () => ({ up: 0, dl: 0 }));
+  // 轮 2：5 天前的累计量（进 all / 月年桶）
+  phase(now - 5 * 86400, s => ({ up: s.up, dl: s.dl }));
+  // 轮 3：今日再次增长（仅前 4 站）→ 产生「今日」流量，其余站横向维持不产增量
+  phase(now - 1800, s => s.today
+    ? { up: s.up + Math.round(s.up * 0.12), dl: s.dl + Math.round(s.dl * 0.12) }
+    : { up: s.up, dl: s.dl });
 }
 
 /* ---------------- 启动 ---------------- */
@@ -1050,6 +1225,10 @@ if (!gotLock) {
     // 截图自检环境常报「减少动态效果」；自检要验证形变插值本身，强制走 on 档，
     // 只影响 shot profile 内存态，不写盘、不影响正式实例。
     if (SHOT_MODE) settings.motion = 'on';
+    // 自检要拍大窗版式，但真实用户的 settings.json 里 docked 常为 true，
+    // 那样一启动就是吸顶小窗，后面所有大窗截图都会拍成一片黑。
+    // 仅 shot 档案（-shot 独立 userData）里复位，不动正式配置。
+    if (SHOT_MODE) { settings.docked = false; settings.edgeDock = true; }
     // 截图自检：注入真实下载器与样本，让界面有内容可看。
     // 仅在 --shot Profile 下执行，与正式实例完全隔离，正式版永远是用户自己配置的空态。
     if (SHOT_MODE) seedShotData(store);

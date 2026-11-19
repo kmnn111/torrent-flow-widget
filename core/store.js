@@ -71,12 +71,48 @@ class Store {
       this.data.site_hourly = (parsed.site_hourly && typeof parsed.site_hourly === 'object' && !Array.isArray(parsed.site_hourly)) ? parsed.site_hourly : {};
       this.data.site_meta = (parsed.site_meta && typeof parsed.site_meta === 'object' && !Array.isArray(parsed.site_meta)) ? parsed.site_meta : {};
       this.data.nextId = Number(parsed.nextId) || 1;
+      this._migrateEmptySiteKey();
       tu.setTzOffset(this.data.settings.tz_offset);
     } catch (e) {
       // 损坏留现场，回退空数据
       try { fs.copyFileSync(this.file, this.file + '.broken'); } catch (_) { }
       this.data = this._blank();
     }
+  }
+  /**
+   * 一次性迁移：清掉旧版本写入的空 key「幽灵站点」。
+   * 旧 collector 在没有 tracker 时调用 identify('')，返回 key 为空串，
+   * 于是所有无 tracker 种子（本机做种/私有种子）的流量都汇总到一个空名字的站，
+   * 真实数据里它一度占了今日 0.41TB↑/0.98TB↓ 并排在榜首。
+   * 现在这类种子改用 'no-site' 专用键；历史空 key 的量并入 'no-site' 以免丢账。
+   */
+  _migrateEmptySiteKey() {
+    const hasEmpty = (o) => o && Object.prototype.hasOwnProperty.call(o, '');
+    if (!hasEmpty(this.data.site_meta) && !hasEmpty(this.data.site_base) && !hasEmpty(this.data.site_hourly)) return false;
+
+    // 历史小时桶合入 no-site（同一小时同一字段累加），保证总量不失真
+    const oldHourly = this.data.site_hourly[''];
+    if (oldHourly) {
+      const dst = this.data.site_hourly['no-site'] || (this.data.site_hourly['no-site'] = {});
+      for (const h in oldHourly) {
+        const src = oldHourly[h], cur = dst[h];
+        if (!cur) { dst[h] = src; continue; }
+        cur.dl_bytes = (cur.dl_bytes || 0) + (src.dl_bytes || 0);
+        cur.up_bytes = (cur.up_bytes || 0) + (src.up_bytes || 0);
+      }
+    }
+    // 基线直接丢弃：no-site 的基线由下一轮采集重建，沿用旧值反而会算错增量
+    delete this.data.site_meta[''];
+    delete this.data.site_base[''];
+    delete this.data.site_hourly[''];
+    const m = this.data.site_meta['no-site'];
+    if (!m) {
+      this.data.site_meta['no-site'] = {
+        name: '无站点', full: '本机/私有种子（无 tracker）', host: '', known: true, last_seen: 0
+      };
+    }
+    this.touch();
+    return true;
   }
   save() {
     try {
@@ -247,11 +283,14 @@ class Store {
   /** 站点元信息（昵称等）落盘，供 UI 直接读，不必重新解析 tracker */
   _siteMeta(key, info) {
     const m = this.data.site_meta[key];
-    if (!m || m.name !== info.name || m.full !== info.full) {
-      this.data.site_meta[key] = {
-        name: info.name, full: info.full || '', host: info.host || '',
-        known: !!info.known, last_seen: 0
-      };
+    // 防御：调用方某一轮可能只带 up/dl 而不带 name（例如补录/自检脚本），
+    // 那时不能把已识别好的站名冲成 undefined —— 站点名丢了就退化成 key。
+    const name = info.name || (m && m.name) || key;
+    const full = info.full !== undefined ? (info.full || '') : ((m && m.full) || '');
+    const host = info.host !== undefined ? (info.host || '') : ((m && m.host) || '');
+    const known = info.known !== undefined ? !!info.known : !!(m && m.known);
+    if (!m || m.name !== name || m.full !== full || m.host !== host || m.known !== known) {
+      this.data.site_meta[key] = { name, full, host, known, last_seen: (m && m.last_seen) || 0 };
     }
   }
 
@@ -282,6 +321,9 @@ class Store {
     for (const key in perSite) {
       const cur = perSite[key];
       if (!cur) continue;
+      // 空 key 会变成一个"幽灵站点"，把不同来源的流量并到一起（历史上真实发生过）。
+      // 站点标识必须非空，空键一律拒收，宁可少记也不能记错账。
+      if (!key || !String(key).trim()) continue;
       this._siteMeta(key, cur);
       const base = this.data.site_base[key] || {};
       const upNow = Number(cur.up) || 0, dlNow = Number(cur.dl) || 0;
@@ -350,6 +392,9 @@ class Store {
     const out = [];
     const keys = new Set([...Object.keys(this.data.site_hourly), ...Object.keys(this.data.site_meta)]);
     for (const key of keys) {
+      // 历史版本可能写入过空 key 的"幽灵站点"（旧版 collector 用 identify('') 兜底）。
+      // 汇总时跳过，避免它继续占据排行首位。
+      if (!key || !String(key).trim()) continue;
       const buckets = this.data.site_hourly[key] || {};
       const acc = {
         day: { dl: 0, up: 0 }, week: { dl: 0, up: 0 }, month: { dl: 0, up: 0 },

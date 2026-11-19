@@ -10,6 +10,14 @@ const sites = require('./sites');
 
 const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
 
+/* 「无站点」专用标识：种子没有任何 tracker（本机做种 / 私有种子 / 接口取不到）时用。
+   与「未知站点」（有域名但未收录）严格区分 —— 两者混用会让所有无 tracker 种子
+   的流量汇总成一个假站点，既污染排行，也掩盖真正待收录的域名。 */
+const NO_SITE_KEY = 'no-site';
+const NO_SITE_INFO = {
+  key: NO_SITE_KEY, name: '无站点', full: '本机/私有种子（无 tracker）', host: '', known: true
+};
+
 class Collector {
   constructor(store, onEvent) {
     this.store = store;
@@ -211,12 +219,18 @@ class Collector {
             }
             info = info || fallback;
           } else {
-            info = sites.identify('');
+            // 无 tracker：交给下面的 NO_SITE_KEY 分支统一处理，不再 identify('')
+            info = null;
           }
           if (!t.tracker && group.length) t.tracker = group[0];
-          const key = info.key;
+          // 没有 tracker 的种子（本机做种 / 私有种子 / tracker 接口取不到）不能走
+          // identify('')：那会返回空 key，把所有无 tracker 种子的流量塞进同一个
+          // 名叫「未知站点」的幽灵站 —— 真实数据里它一度占了今日 424GB↑/1003GB↓，
+          // 把真正的未知站也一起吞了。改为专用 key + 明确文案，与真实站点区分开。
+          const key = info ? info.key : NO_SITE_KEY;
+          const meta = info || NO_SITE_INFO;
           const s = perSite[key] || (perSite[key] = {
-            up: 0, dl: 0, name: info.name, full: info.full, host: info.host, known: info.known, count: 0
+            up: 0, dl: 0, name: meta.name, full: meta.full, host: meta.host, known: meta.known, count: 0
           });
           s.up += t.uploaded || 0;
           s.dl += t.downloaded || 0;
@@ -226,7 +240,7 @@ class Collector {
               id: d.id, dl_name: d.name, hash: t.hash, name: t.name,
               progress: t.progress, size: t.size, amount_left: t.amount_left,
               dl_rate: t.dl_rate, up_rate: t.up_rate, eta: t.eta,
-              state: t.state, site: info.name, site_key: key
+              state: t.state, site: meta.name, site_key: key
             });
           }
         }

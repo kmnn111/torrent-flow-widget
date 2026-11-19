@@ -127,10 +127,10 @@
           正在下载
           <em class="sub" id="torrentSub"></em>
         </div>
-        <div class="torrent-list" id="torrentList"></div>
+        <div class="torrent-list" id="torrentList" data-scroll-self></div>
       </section>
 
-      <!-- 6) PT 站点流量 -->
+      <!-- 6) PT 站点流量：模块内独立纵向滚动，站点再多也不撑高窗口 -->
       <section class="card site-panel">
         <div class="card-title">
           PT 站点
@@ -141,7 +141,22 @@
             <button class="seg-btn" id="sitePeriodAll" data-p="all">总计</button>
           </span>
         </div>
-        <div class="site-list" id="siteList"></div>
+        <div class="site-box">
+          <div class="site-head">
+            <span class="sh-name">站点</span>
+            <span class="sh-up">上传</span>
+            <span class="sh-dl">下载</span>
+          </div>
+          <div class="site-scroll" id="siteScroll" data-scroll-self>
+            <div class="site-list" id="siteList"></div>
+          </div>
+        </div>
+        <div class="site-total">
+          <span>合计</span>
+          <b class="u" id="siteTotUp">↑0</b>
+          <b class="d" id="siteTotDl">↓0</b>
+        </div>
+        <div class="site-note" id="siteNote"></div>
       </section>
 
       <footer class="foot" id="footText">数据仅存本机 · 累计计数器差分统计</footer>
