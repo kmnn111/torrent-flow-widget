@@ -23,6 +23,9 @@ const PALETTE = [
   ['#5b8fd4', '#d97b9c'], ['#4fa89b', '#c96f4a'], ['#c96f4a', '#4fa89b'],
   ['#8bab3f', '#b06ca8'], ['#d97b9c', '#5b8fd4']
 ];
+/** 站点单轮增量上限：整站一小时涨 1TB 以上必是异常（换库/重新校验/统计口径跳变）。
+    超限按 0 记，但基线照常写回，下一轮即恢复正常。 */
+const MAX_SITE_STEP = Math.pow(1024, 4);
 
 class Store {
   constructor(filePath) {
@@ -37,6 +40,11 @@ class Store {
       downloaders: [],
       settings: { poll_interval: 5, traffic_interval: 60, live_span: 300, tz_offset: 8, request_timeout: 5 },
       state: {}, hourly: {}, samples: [], traffic_samples: [], nextId: 1,
+      // PT 站流量账本：
+      //   site_base: { [siteKey]: { [dlId]: { up, dl } } }  ← 每个种子累计值的基线（差分用）
+      //   site_hourly: { [siteKey]: { [hourTs]: {day,week,month,year,dl_bytes,up_bytes} } }
+      //   site_meta: { [siteKey]: {name, full, host, known, last_seen} }   ← 昵称与最近活跃
+      site_base: {}, site_hourly: {}, site_meta: {},
       // 演示数据功能已彻底移除。保留 demoOptedOut 仅为兼容旧数据读取，不再参与任何逻辑。
       demoOptedOut: false
     };
@@ -57,6 +65,9 @@ class Store {
       this.data.hourly = (parsed.hourly && typeof parsed.hourly === 'object' && !Array.isArray(parsed.hourly)) ? parsed.hourly : {};
       this.data.samples = Array.isArray(parsed.samples) ? parsed.samples : [];
       this.data.traffic_samples = Array.isArray(parsed.traffic_samples) ? parsed.traffic_samples : [];
+      this.data.site_base = (parsed.site_base && typeof parsed.site_base === 'object' && !Array.isArray(parsed.site_base)) ? parsed.site_base : {};
+      this.data.site_hourly = (parsed.site_hourly && typeof parsed.site_hourly === 'object' && !Array.isArray(parsed.site_hourly)) ? parsed.site_hourly : {};
+      this.data.site_meta = (parsed.site_meta && typeof parsed.site_meta === 'object' && !Array.isArray(parsed.site_meta)) ? parsed.site_meta : {};
       this.data.nextId = Number(parsed.nextId) || 1;
       tu.setTzOffset(this.data.settings.tz_offset);
     } catch (e) {
@@ -221,6 +232,128 @@ class Store {
     // 写回时间基线：下一次差分才知道这次增量跨越了多长时间，才能正确分摊到小时桶
     this.getState(id).last_ts = ts;
     this.touch();
+  }
+
+  /* ---------- PT 站点流量账本 ----------
+     为什么不能直接用种子的 uploaded/downloaded 分周期：
+     这两个是「种子自加入以来的累计值」，老种子今天仍在做种、上传量一直在涨，
+     用 added_on 去切「今日/本周」会把十年的累计全算进今天（实测：今天新增种子
+     只占上传 53GB，而真实日上传靠的是几百个老种子）。所以周期只能靠差分记账：
+     每轮抓取每站所有种子的累计值，与上一轮基线的差值就是这段时间的新增流量，
+     再按 recordTraffic 同样的方式摊到小时桶。 */
+
+  /** 站点元信息（昵称等）落盘，供 UI 直接读，不必重新解析 tracker */
+  _siteMeta(key, info) {
+    const m = this.data.site_meta[key];
+    if (!m || m.name !== info.name || m.full !== info.full) {
+      this.data.site_meta[key] = {
+        name: info.name, full: info.full || '', host: info.host || '',
+        known: !!info.known, last_seen: 0
+      };
+    }
+  }
+
+  /**
+   * 用「每站种子的累计上传/下载合计」做差分，写入站点小时桶。
+   * @param {number} ts 本轮时间戳（秒）
+   * @param {Object} perSite { [siteKey]: { up, dl, name, full, host, known } }
+   * @returns {{changed:boolean, events:Object}}
+   */
+  recordSiteTraffic(ts, perSite) {
+    const prevTs = this.data.site_last_ts || 0;
+    const span = prevTs ? Math.min(3600, Math.max(1, ts - prevTs)) : 0;
+    const segments = [];
+    if (span > 0) {
+      let cur = ts - span;
+      while (cur < ts) {
+        const h = tu.hourFloor(cur);
+        const segEnd = Math.min(ts, h + 3600);
+        segments.push([h, segEnd - cur]);
+        cur = segEnd;
+      }
+    } else {
+      segments.push([tu.hourFloor(ts), 1]);
+    }
+
+    const events = {};
+    let changed = false;
+    for (const key in perSite) {
+      const cur = perSite[key];
+      if (!cur) continue;
+      this._siteMeta(key, cur);
+      const base = this.data.site_base[key] || {};
+      const upNow = Number(cur.up) || 0, dlNow = Number(cur.dl) || 0;
+      const prevUp = Number(base.up), prevDl = Number(base.dl);
+      const firstRound = !Number.isFinite(prevUp) || !Number.isFinite(prevDl);
+
+      // 与 downloaders 同口径：负值=站点重置/换种，按 0 计但必须重建基线
+      let upInc = 0, dlInc = 0;
+      if (!firstRound) {
+        const du = upNow - prevUp, dd = dlNow - prevDl;
+        // 单轮增量上限：整站一小时涨幅超 1TB 视为异常（换库/重新校验），不记
+        if (du > 0 && du < MAX_SITE_STEP) upInc = du;
+        if (dd > 0 && dd < MAX_SITE_STEP) dlInc = dd;
+        events[key] = { up: upInc, dl: dlInc, reset: du < 0 || dd < 0 };
+      } else {
+        events[key] = { up: 0, dl: 0, first: true };
+      }
+
+      if (upInc || dlInc) {
+        if (!this.data.site_hourly[key]) this.data.site_hourly[key] = {};
+        const buckets = this.data.site_hourly[key];
+        for (const [h, w] of segments) {
+          const meta = tu.hourMeta(h);
+          const k = String(h);
+          const b = buckets[k] || (buckets[k] = { day: meta.day, week: meta.week, month: meta.month, year: meta.year, dl_bytes: 0, up_bytes: 0 });
+          const s = span > 0 ? (w / span) : 1;
+          b.dl_bytes += Math.round(dlInc * s);
+          b.up_bytes += Math.round(upInc * s);
+        }
+        changed = true;
+      }
+
+      // 基线无条件写回（含首轮），否则永远错过基线，每次都是 no_base
+      this.data.site_base[key] = { up: upNow, dl: dlNow };
+      const mm = this.data.site_meta[key];
+      if (mm) mm.last_seen = ts;
+    }
+    this.data.site_last_ts = ts;
+    if (changed) this.touch();
+    return { changed, events };
+  }
+
+  /** 站点周期汇总：[{key,name,full,host,known,day,week,month,year,all,...}] */
+  siteTotals() {
+    const now = Math.floor(Date.now() / 1000);
+    const cur = { day: tu.dayKey(now), week: tu.weekKey(now), month: tu.monthKey(now), year: tu.yearKey(now) };
+    const out = [];
+    const keys = new Set([...Object.keys(this.data.site_hourly), ...Object.keys(this.data.site_meta)]);
+    for (const key of keys) {
+      const buckets = this.data.site_hourly[key] || {};
+      const acc = {
+        day: { dl: 0, up: 0 }, week: { dl: 0, up: 0 }, month: { dl: 0, up: 0 },
+        year: { dl: 0, up: 0 }, all: { dl: 0, up: 0 }
+      };
+      for (const k in buckets) {
+        const b = buckets[k];
+        const dl = b.dl_bytes || 0, up = b.up_bytes || 0;
+        if (!dl && !up) continue;
+        acc.all.dl += dl; acc.all.up += up;
+        if (b.day === cur.day) { acc.day.dl += dl; acc.day.up += up; }
+        if (b.week === cur.week) { acc.week.dl += dl; acc.week.up += up; }
+        if (b.month === cur.month) { acc.month.dl += dl; acc.month.up += up; }
+        if (b.year === cur.year) { acc.year.dl += dl; acc.year.up += up; }
+      }
+      const m = this.data.site_meta[key] || { name: key, full: '', known: false };
+      out.push({
+        key, name: m.name || key, full: m.full || '', host: m.host || '',
+        known: !!m.known, last_seen: m.last_seen || 0,
+        day: acc.day, week: acc.week, month: acc.month, year: acc.year, all: acc.all,
+        total: acc.all.up + acc.all.dl
+      });
+    }
+    // 有流量的排前面；同流量按站点名稳定排序，避免界面每次刷新跳位
+    return out.sort((a, b) => (b.total - a.total) || String(a.name).localeCompare(String(b.name)));
   }
 
   /* ---------- 查询 ---------- */

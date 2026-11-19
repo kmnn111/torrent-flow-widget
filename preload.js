@@ -22,6 +22,9 @@ contextBridge.exposeInMainWorld('flow', {
   settingsGet: () => ipcRenderer.invoke('app:settings-get'),
   periods: (gran) => ipcRenderer.invoke('app:periods', gran),
   chart: (p) => ipcRenderer.invoke('app:chart', p),
+  /* 种子与 PT 站点 */
+  activeTorrents: () => ipcRenderer.invoke('app:active-torrents'),
+  siteTotals: () => ipcRenderer.invoke('app:site-totals'),
   isDemo: () => ipcRenderer.invoke('app:is-demo'),
   onData: (kind, cb) => ipcRenderer.on('data:' + kind, (_e, d) => cb && cb(d)),
 

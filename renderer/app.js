@@ -24,6 +24,9 @@
     chartPick: new Set(['all']), // 选中的下载器（'all' 或 id 字符串）
     _chartReq: { rate: 0, traffic: 0 }, // 图表请求序号，防旧回包覆盖新范围
     _periodReq: { day: 0, week: 0, month: 0, year: 0 },
+    activeTorrents: { at: 0, list: [], total_up_rate: 0 },
+    siteData: { at: 0, sites: [] },
+    sitePeriod: 'day', // PT 站点模块当前查看的周期：今日 / 本周 / 总计
     refreshTimer: null, lastUpdate: 0, fetching: false
   };
 
@@ -96,7 +99,8 @@
       renderDownloaders();
       await Promise.all([
         loadPeriod('day'), loadPeriod('week'), loadPeriod('month'), loadPeriod('year'),
-        loadChart('rate'), loadChart('traffic')
+        loadChart('rate'), loadChart('traffic'),
+        loadActiveTorrents(), loadSites()
       ]);
       updateTrayInfo();
     } catch (e) {
@@ -592,6 +596,121 @@
   $('closeDetail').addEventListener('click', () => $('detailModal').hidden = true);
   $('detailModal').addEventListener('click', e => { if (e.target === $('detailModal')) $('detailModal').hidden = true; });
 
+  /* ================= 正在下载的种子 =================
+     名称简略显示：中间省略（保头保尾），完整名称放 title，鼠标悬停即见。
+     头部通常是剧名/番号，尾部是分辨率与压制组，对 PT 用户都是关键信息，
+     所以不能简单截断。 */
+  const truncMid = (s, head, tail) => {
+    const str = String(s || '');
+    if (str.length <= head + tail + 1) return str;
+    return str.slice(0, head) + '…' + str.slice(str.length - tail);
+  };
+  const STATE_TEXT = {
+    downloading: '下载中', stalled: '等待中', seeding: '做种', paused: '暂停', error: '出错', checking: '校验中', other: '—'
+  };
+  function fmtEta(sec) {
+    const n = Number(sec) || 0;
+    if (n <= 0) return '—';
+    if (n > 86400) return '>1 天';
+    const h = Math.floor(n / 3600), m = Math.floor((n % 3600) / 60);
+    if (h) return `${h}时${m}分`;
+    return `${m}分${Math.floor(n % 60)}秒`;
+  }
+  async function loadActiveTorrents() {
+    try {
+      const d = await window.flow.activeTorrents();
+      state.activeTorrents = d;
+      renderActiveTorrents();
+    } catch (e) { }
+  }
+  function renderActiveTorrents() {
+    const box = $('torrentList'); if (!box) return;
+    const d = state.activeTorrents || { list: [], total_up_rate: 0 };
+    const list = d.list || [];
+    if (!list.length) {
+      $('torrentSub').textContent = '';
+      box.innerHTML = `<div class="empty-line">当前没有正在下载的种子</div>`;
+      return;
+    }
+    const sumRate = list.reduce((a, t) => a + (t.dl_rate || 0), 0);
+    $('torrentSub').textContent = `${list.length} 个 · ${fmtRate(sumRate)}`;
+    box.innerHTML = list.map(t => {
+      const pct = Math.max(0, Math.min(100, (t.progress || 0) * 100));
+      const site = t.site && t.site !== '未知站点' ? `<span class="tor-site">${esc(t.site)}</span>` : '';
+      const speed = t.dl_rate > 0 ? `<span class="tor-speed">↓${fmtRate(t.dl_rate)}</span>` : `<span class="tor-speed idle">${esc(STATE_TEXT[t.state] || '—')}</span>`;
+      return `<div class="tor-row" title="${esc(t.name)}">
+        <div class="tor-head">
+          <span class="tor-name">${esc(truncMid(t.name, 20, 12))}</span>
+          ${site}
+        </div>
+        <div class="tor-bar"><i style="width:${pct.toFixed(1)}%"></i></div>
+        <div class="tor-meta">
+          <span class="tor-pct">${pct.toFixed(1)}%</span>
+          <span class="tor-size">${fmtBytes(t.amount_left)} 剩</span>
+          <span class="tor-eta">${fmtEta(t.eta)}</span>
+          ${speed}
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  /* ================= PT 站点流量 ================= */
+  async function loadSites() {
+    try {
+      const d = await window.flow.siteTotals();
+      state.siteData = d;
+      renderSites();
+    } catch (e) { }
+  }
+  function renderSites() {
+    const box = $('siteList'); if (!box) return;
+    const d = state.siteData || { sites: [] };
+    const all = d.sites || [];
+    const p = state.sitePeriod || 'day';
+    // 只显示该周期有流量的站，避免几十行全 0 稀释信息
+    const rows = all.filter(s => (s[p] && (s[p].up + s[p].dl)) > 0);
+    // 段选按钮高亮
+    for (const id of ['sitePeriodDay', 'sitePeriodWeek', 'sitePeriodAll']) {
+      const el = $(id); if (!el) continue;
+      el.classList.toggle('active', el.dataset.p === p);
+    }
+    if (!rows.length) {
+      $('siteSub').textContent = '';
+      const empty = p === 'day' ? '今日还没有站点流量' : (p === 'week' ? '本周还没有站点流量' : '还没有累计站点流量');
+      box.innerHTML = `<div class="empty-line">${empty}</div>`;
+      return;
+    }
+    const tot = rows.reduce((a, s) => ({ up: a.up + s[p].up, dl: a.dl + s[p].dl }), { up: 0, dl: 0 });
+    $('siteSub').textContent = `${rows.length} 站`;
+    const max = Math.max(...rows.map(s => Math.max(s[p].up, s[p].dl)), 1);
+    let html = `<div class="site-head">
+      <span class="sh-name">站点</span>
+      <span class="sh-up">上传</span>
+      <span class="sh-dl">下载</span>
+    </div>`;
+    html += rows.map(s => {
+      const upW = (s[p].up / max * 100).toFixed(1);
+      const dlW = (s[p].dl / max * 100).toFixed(1);
+      const title = s.full ? `${s.full}${s.host ? ' · ' + s.host : ''}` : (s.host || s.name);
+      return `<div class="site-row" title="${esc(title)}">
+        <div class="site-name">
+          <b>${esc(s.name)}</b>
+          ${s.known ? '' : '<i class="site-unknown">未收录</i>'}
+        </div>
+        <div class="site-nums">
+          <span class="sn up"><i class="sn-bar" style="width:${upW}%"></i><em>${fmtBytes(s[p].up)}</em></span>
+          <span class="sn dl"><i class="sn-bar" style="width:${dlW}%"></i><em>${fmtBytes(s[p].dl)}</em></span>
+        </div>
+      </div>`;
+    }).join('');
+    html += `<div class="site-total">
+      <span>合计</span>
+      <b class="u">↑${fmtBytes(tot.up)}</b>
+      <b class="d">↓${fmtBytes(tot.dl)}</b>
+    </div>`;
+    box.innerHTML = html;
+  }
+
   /* ================= 托盘信息 ================= */
   function updateTrayInfo() {
     if (!state.overview || state.settings && state.settings.trayInfo === false) return;
@@ -855,7 +974,7 @@
     const off = state.settings.motion === 'off';
     document.documentElement.classList.toggle('motion-off', off);
     if (state.settings.alwaysOnTop) $('btnPin').style.color = 'var(--sun-deep)';
-    $('panelVersion').textContent = 'v' + ((window.flow.version && window.flow.version()) || '1.0.2');
+    $('panelVersion').textContent = 'v' + ((window.flow.version && window.flow.version()) || '1.0.3');
     tickClock();
     if (!window.__clockTimer) window.__clockTimer = setInterval(tickClock, 1000);
     // 回到前台立刻补一次刷新，避免隐藏期间暂停刷新导致数据看起来是旧的
@@ -873,6 +992,16 @@
     // 实时事件：rate 局部刷新
     window.flow.onData('rate', () => { refreshAll(true); });
     window.flow.onData('traffic', () => { /* traffic 完成由 rate 事件已覆盖，避免双刷 */ });
+    // 种子轮（低频）：只刷这两个模块，不牵动整屏图表
+    window.flow.onData('sites', () => {
+      if (document.hidden) return; // 隐藏时不做无谓请求（与整屏刷新同策略）
+      loadActiveTorrents(); loadSites();
+    });
+    // PT 站点周期切换：今日 / 本周 / 总计（纯本地重排，无需重新请求）
+    for (const id of ['sitePeriodDay', 'sitePeriodWeek', 'sitePeriodAll']) {
+      const el = $(id);
+      if (el) el.addEventListener('click', () => { state.sitePeriod = el.dataset.p; renderSites(); });
+    }
     // 吸顶状态
     window.flow.onDockState(s => {
       document.body.classList.toggle('docked', !!s.docked);

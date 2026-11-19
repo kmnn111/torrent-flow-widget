@@ -292,6 +292,7 @@ body.docked:not(.expanded) #tooltip { display: none !important; }
 .panel-body { flex: 1; overflow-y: auto; padding: 14px 18px 30px; scrollbar-width: none; -ms-overflow-style: none; overscroll-behavior: contain; }
 .panel-body h4 { font-size: 12px; margin: 16px 0 6px; color: var(--ink); }
 .hint { font-size: 10px; color: var(--ink-soft); line-height: 1.5; }
+.hint-inline { font-size: 10px; font-weight: 400; color: var(--ink-soft); margin-left: 2px; }
 .settings-nav { display: flex; gap: 4px; border-bottom: 1px solid rgba(123,159,196,.2); }
 .st-nav { flex: 1; font-family: inherit; font-size: 12px; padding: 8px 4px; border: none; background: transparent; color: var(--ink-soft); cursor: pointer; border-bottom: 2px solid transparent; }
 .st-nav.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 700; }
@@ -332,6 +333,61 @@ body.docked:not(.expanded) #tooltip { display: none !important; }
 
 /* tooltip */
 .tooltip { position: fixed; z-index: 80; pointer-events: none; background: var(--paper-strong); border: 1px solid rgba(123,159,196,.3); border-radius: 9px; padding: 8px 10px; font-size: 11px; box-shadow: var(--shadow); line-height: 1.6; white-space: nowrap; max-height: 60vh; overflow: hidden; }
+
+/* ================= 正在下载的种子 ================= */
+.torrent-list { display: flex; flex-direction: column; gap: 9px; max-height: 232px; overflow-y: auto; overflow-x: hidden; }
+.tor-row { padding: 8px 10px; border-radius: 10px; background: color-mix(in srgb, var(--accent) 6%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 14%, transparent); cursor: default; transition: background .16s, border-color .16s; }
+.tor-row:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); border-color: color-mix(in srgb, var(--accent) 26%, transparent); }
+.tor-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+/* 名称过长时用 flex 收缩 + 省略，配合 title 悬停看全称 */
+.tor-name { font-size: 12px; color: var(--ink); font-weight: 600; flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; letter-spacing: .1px; }
+.tor-site { flex: none; font-size: 10px; color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-radius: 6px; padding: 1px 6px; white-space: nowrap; }
+.tor-bar { height: 4px; border-radius: 3px; background: color-mix(in srgb, var(--accent) 16%, transparent); overflow: hidden; }
+.tor-bar i { display: block; height: 100%; border-radius: 3px;
+  background: linear-gradient(90deg, var(--sky), color-mix(in srgb, var(--sky) 55%, var(--sun)));
+  transition: width .5s cubic-bezier(.25,.8,.3,1); }
+.tor-meta { display: flex; align-items: center; gap: 8px; margin-top: 5px; font-size: 10px; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+.tor-pct { color: var(--sky); font-weight: 700; }
+.tor-size, .tor-eta { opacity: .9; }
+.tor-speed { margin-left: auto; color: var(--sun-deep); font-weight: 700; }
+.tor-speed.idle { color: var(--ink-soft); font-weight: 400; }
+.empty-line { font-size: 11px; color: var(--ink-soft); text-align: center; padding: 14px 0; }
+
+/* ================= PT 站点流量 ================= */
+.seg-btn { border: 1px solid color-mix(in srgb, var(--accent) 34%, transparent); background: transparent;
+  color: var(--ink-soft); border-radius: 999px; padding: 3px 9px; font-size: 11px; cursor: pointer;
+  font-family: inherit; transition: .15s; }
+.seg-btn:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.seg-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 700; }
+.site-list { display: flex; flex-direction: column; gap: 7px; max-height: 268px; overflow-y: auto; overflow-x: hidden; }
+.site-head { display: grid; grid-template-columns: 1fr 92px 92px; gap: 8px; font-size: 10px; color: var(--ink-soft);
+  padding: 0 2px 2px; border-bottom: 1px solid color-mix(in srgb, var(--accent) 16%, transparent); }
+.site-head .sh-up, .site-head .sh-dl { text-align: right; }
+.site-row { display: grid; grid-template-columns: 1fr 92px 92px; gap: 8px; align-items: center;
+  padding: 5px 2px; border-radius: 8px; transition: background .15s; }
+.site-row:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.site-name { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.site-name b { font-size: 12px; color: var(--ink); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.site-unknown { flex: none; font-style: normal; font-size: 9px; color: var(--ink-soft); opacity: .65;
+  border: 1px solid currentColor; border-radius: 4px; padding: 0 3px; line-height: 1.4; }
+.site-nums { display: contents; }
+/* 数字右对齐 + 条形底衬：条形从右往左生长，视觉上不顶到文字 */
+.sn { position: relative; text-align: right; font-size: 11px; font-variant-numeric: tabular-nums; padding: 2px 4px; border-radius: 5px; overflow: hidden; }
+.sn em { position: relative; font-style: normal; font-weight: 600; }
+.sn .sn-bar { position: absolute; top: 0; right: 0; bottom: 0; border-radius: 5px; opacity: .16; transition: width .45s cubic-bezier(.25,.8,.3,1); }
+.sn.up em { color: var(--sun-deep); }
+.sn.up .sn-bar { background: var(--sun); }
+.sn.dl em { color: var(--sky); }
+.sn.dl .sn-bar { background: var(--sky); }
+.site-total { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center;
+  margin-top: 6px; padding-top: 8px; border-top: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+  font-size: 11px; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+.site-total b { font-weight: 700; }
+.site-total b.u { color: var(--sun-deep); }
+.site-total b.d { color: var(--sky); }
 
 /* 减少动效（用户显式关闭时） */
 :root.motion-off *, :root.motion-off *::before, :root.motion-off *::after { animation: none !important; transition: none !important; }

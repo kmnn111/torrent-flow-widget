@@ -121,6 +121,29 @@
         <div class="legend" id="trafficLegend"></div>
       </section>
 
+      <!-- 5) 正在下载的种子 -->
+      <section class="card torrent-panel">
+        <div class="card-title">
+          正在下载
+          <em class="sub" id="torrentSub"></em>
+        </div>
+        <div class="torrent-list" id="torrentList"></div>
+      </section>
+
+      <!-- 6) PT 站点流量 -->
+      <section class="card site-panel">
+        <div class="card-title">
+          PT 站点
+          <em class="sub" id="siteSub"></em>
+          <span class="title-actions">
+            <button class="seg-btn" id="sitePeriodDay" data-p="day">今日</button>
+            <button class="seg-btn" id="sitePeriodWeek" data-p="week">本周</button>
+            <button class="seg-btn" id="sitePeriodAll" data-p="all">总计</button>
+          </span>
+        </div>
+        <div class="site-list" id="siteList"></div>
+      </section>
+
       <footer class="foot" id="footText">数据仅存本机 · 累计计数器差分统计</footer>
     </main>
   </div>
@@ -181,7 +204,8 @@
         </section>
         <!-- 窗口 -->
         <section class="st-page" data-page="window" hidden>
-          <label class="check"><input type="checkbox" id="chkTop" /> 窗口置顶显示</label>
+          <label class="check"><input type="checkbox" id="chkTop" /> 窗口置顶显示<span class="hint-inline">（会压在其他程序之上）</span></label>
+          <p class="hint">关闭后小窗贴在壁纸层上方：按 Win+D 显示桌面时浮到最上层，平时不遮挡浏览器和全屏程序。</p>
           <label class="check"><input type="checkbox" id="chkAuto" /> 开机自动启动</label>
           <label class="check"><input type="checkbox" id="chkEdgeDock" /> 顶部吸附（拖到顶端收起为小窗，悬停展开）</label>
           <label class="check"><input type="checkbox" id="chkTrayInfo" /> 托盘显示实时速率</label>

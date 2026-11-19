@@ -27,7 +27,12 @@ let collector = null;
 let win = null;
 let tray = null;
 let settings = {
-  alwaysOnTop: true,
+  // 桌面部件语义（对齐天气台）：默认「不置顶」。
+  // Windows 上 setAlwaysOnTop(true, level) 的 level 是 macOS 专属参数（electron.d.ts
+  // 标注 @platform darwin），flag=true 即 HWND_TOPMOST、无法再分层——置顶就必然压住
+  // 浏览器/全屏程序。要做到「显示桌面时浮在桌面最上层、平时不挡任何窗口」，
+  // 唯一出路是不置顶、改走壁纸层粘连（见 applyTopmost / glueTick）。
+  alwaysOnTop: false,
   autoLaunch: false,
   winPos: null,
   winSize: null,
@@ -63,6 +68,15 @@ function loadSettings() {
   // v1.0.28 热修：曾误把动效默认设成「跟随系统」，本机系统减动效让雷达整卡静止。
   // 用户明确否决自动减少动效 → 旧落盘的 system 一次性归位为始终播放（写回后不再触发）。
   if (settings.motion === 'system') { settings.motion = 'on'; persist(); }
+  // v1.0.3 一次性迁移（ver 4）：v1.0.2 及更早版本的 alwaysOnTop 默认值是 true，
+  // 吸顶小窗常驻 HWND_TOPMOST，会压在浏览器/全屏程序之上（用户实测反馈）。
+  // 桌面部件的正确语义是「不置顶 + 壁纸层粘连」：Win+D 浮到桌面最上层，平时不挡任何窗口。
+  // 只在吸顶态迁移（大窗用户若自己开过置顶，是明确意图，不动）；迁移后以用户后续选择为准。
+  if (settings.ver !== 4) {
+    settings.ver = 4;
+    if (settings.docked && settings.alwaysOnTop) settings.alwaysOnTop = false;
+    persist();
+  }
 }
 function persist(patch = {}) {
   Object.assign(settings, patch);
@@ -361,6 +375,21 @@ function registerIpc() {
   ipcMain.handle('app:settings-get', () => store.getSettings());
   ipcMain.handle('app:periods', (_e, gran) => store.periodSeries(gran));
   ipcMain.handle('app:chart', (_e, p) => chartCore.build(store, p && p.range, p && p.metric, p && p.offset));
+
+  /* 正在下载的种子（含所属站点昵称） */
+  ipcMain.handle('app:active-torrents', () => {
+    const list = (collector && collector.activeTorrents) || [];
+    return {
+      at: (collector && collector.activeTs) || 0,
+      total_up_rate: list.reduce((a, t) => a + (t.dl_rate || 0), 0),
+      list
+    };
+  });
+  /* PT 站点周期流量（今日 / 本周 / 总计…） */
+  ipcMain.handle('app:site-totals', () => ({
+    at: Math.floor(Date.now() / 1000),
+    sites: store.siteTotals()
+  }));
   ipcMain.handle('app:is-demo', () => !!(collector && collector.isDemo()));
 
   function sanitizeDl(d) {

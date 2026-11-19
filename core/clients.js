@@ -138,8 +138,14 @@ class QBClient {
     return res.status === 200 ? res.body.trim() : '';
   }
   async torrents() {
-    const res = await request(this.base + '/api/v2/torrents/info', { timeout: this.timeout, cookie: this.cookie, headers: this._originHeaders() });
-    if (res.status !== 200) return [];
+    if (!this.cookie) await this.login();
+    let res = await request(this.base + '/api/v2/torrents/info', { timeout: this.timeout, cookie: this.cookie, headers: this._originHeaders() });
+    if (res.status === 401 || res.status === 403) { // cookie 过期：重登一次再取
+      this.cookie = ''; this.rid = 0;
+      await this.login();
+      res = await request(this.base + '/api/v2/torrents/info', { timeout: this.timeout, cookie: this.cookie, headers: this._originHeaders() });
+    }
+    if (res.status !== 200) return { counts: null, list: [] };
     const arr = JSON.parse(res.body);
     const counts = { total: arr.length, seeding: 0, uploading: 0, downloading: 0, paused: 0, error: 0, checking: 0 };
     let size = 0;
@@ -153,7 +159,26 @@ class QBClient {
       else if (s.indexOf('error') === 0) counts.error++;
       else if (s.indexOf('check') >= 0) counts.checking++;
     }
-    return { counts, total_size: size };
+    return { counts, total_size: size, list: arr.map(qbTorrent) };
+  }
+
+  /**
+   * 单个种子的 tracker 列表（用于 tracker 字段为空的种子反查站点）
+   * qBittorrent 的 torrents/info 里 tracker 只有「当前生效的一个」，
+   * 实测有 17% 的种子该字段为空，但其 trackers 接口仍能列出全部 tracker。
+   */
+  async trackers(hash) {
+    if (!hash) return [];
+    if (!this.cookie) await this.login();
+    const res = await request(`${this.base}/api/v2/torrents/trackers?hash=${encodeURIComponent(hash)}`,
+      { timeout: this.timeout, cookie: this.cookie, headers: this._originHeaders() });
+    if (res.status !== 200) return [];
+    let arr = [];
+    try { arr = JSON.parse(res.body); } catch (e) { return []; }
+    // tier < 0 的是 DHT / PeX / LSD 等非站点来源，不是 PT 站，必须排除
+    return (Array.isArray(arr) ? arr : [])
+      .filter(x => Number(x.tier) >= 0 && x.url)
+      .map(x => String(x.url));
   }
 }
 
@@ -218,7 +243,12 @@ class TRClient {
     return String(a.version || '');
   }
   async torrents() {
-    const a = await this.rpc('torrent-get', { fields: ['status', 'sizeWhenDone', 'error', 'rateDownload', 'rateUpload'] });
+    const fields = [
+      'status', 'sizeWhenDone', 'totalSize', 'error', 'rateDownload', 'rateUpload',
+      'name', 'hashString', 'percentDone', 'uploadedEver', 'downloadedEver',
+      'leftUntilDone', 'eta', 'addedDate', 'tracker', 'labels', 'uploadRatio'
+    ];
+    const a = await this.rpc('torrent-get', { fields });
     const arr = a.torrents || [];
     const counts = { total: arr.length, seeding: 0, uploading: 0, downloading: 0, paused: 0, error: 0, checking: 0 };
     let size = 0;
@@ -231,8 +261,97 @@ class TRClient {
       else if (t.error) counts.error++;
       else if (st === 2) counts.checking++;
     }
-    return { counts, total_size: size };
+    return { counts, total_size: size, list: arr.map(trTorrent) };
   }
+  /** 单种子 tracker 列表；Transmission 的 torrent-get 已含 tracker 字段，
+      这里保留同名接口以对齐 qB，返回 [{announce}] 形式由上层统一处理 */
+  async trackers(hash) {
+    if (!hash) return [];
+    const a = await this.rpc('torrent-get', { ids: [hash], fields: ['trackerStats'] });
+    const t = (a.torrents || [])[0] || {};
+    return (t.trackerStats || []).map(x => String(x.announce || '')).filter(Boolean);
+  }
+}
+
+/* ==================== 种子明细归一化 ====================
+   两个客户端字段命名完全不同（qb: dlspeed/upspeed/uploaded/downloaded，
+   tr: rateDownload/rateUpload/uploadedEver/downloadedEver，状态还是数字枚举），
+   统一成一套结构，上层（种子列表 / 站点流量）就不必到处判类型。 */
+
+/** qBittorrent 的 state 归一为语义状态 */
+function qbState(s) {
+  const v = String(s || '');
+  if (v === 'downloading' || v === 'metaDL' || v === 'forcedDL' || v === 'allocating') return 'downloading';
+  if (v === 'uploading' || v === 'forcedUP') return 'uploading';
+  if (v === 'seeding') return 'seeding';
+  if (v === 'stalledDL') return 'stalled';
+  if (v === 'stalledUP') return 'seeding';
+  if (v.indexOf('paused') === 0 || v === 'stoppedDL' || v === 'stoppedUP') return 'paused';
+  if (v.indexOf('error') === 0 || v === 'missingFiles') return 'error';
+  if (v.indexOf('check') >= 0 || v.indexOf('moving') >= 0) return 'checking';
+  return 'other';
+}
+
+function qbTorrent(t) {
+  const size = positiveInt(t.size);
+  const done = positiveInt(t.completed);
+  return {
+    hash: String(t.hash || ''),
+    name: String(t.name || '(未命名)'),
+    size,
+    // qB 的 progress 已是 0~1 比例
+    progress: Math.max(0, Math.min(1, Number(t.progress) || 0)),
+    state: qbState(t.state),
+    raw_state: String(t.state || ''),
+    dl_rate: positiveFloat(t.dlspeed),
+    up_rate: positiveFloat(t.upspeed),
+    downloaded: positiveInt(t.downloaded),
+    uploaded: positiveInt(t.uploaded),
+    eta: Number.isFinite(Number(t.eta)) && Number(t.eta) > 0 && Number(t.eta) < 8640000 ? Number(t.eta) : 0,
+    added_on: positiveInt(t.added_on),
+    tracker: String(t.tracker || ''),
+    category: String(t.category || ''),
+    ratio: Number(t.ratio) || 0,
+    amount_left: Math.max(0, size - done)
+  };
+}
+
+/** Transmission 的 status 数字 → 语义状态（0停 1待检 2检查 3下载 4待种 5种子 6停止中） */
+function trState(st, err) {
+  const n = Number(st);
+  if (err) return 'error';
+  if (n === 3 || n === 1 || n === 2) return n === 3 ? 'downloading' : 'checking';
+  if (n === 4 || n === 5) return 'seeding';
+  if (n === 6) return 'paused';
+  if (n === 0) return 'paused';
+  return 'other';
+}
+
+function trTorrent(t) {
+  const size = positiveInt(t.totalSize || t.sizeWhenDone);
+  const downloaded = positiveInt(t.downloadedEver);
+  const left = positiveInt(t.leftUntilDone);
+  // Transmission 不直接给 progress，用「已下载 / (已下载 + 待下载)」推算；
+  // 播种完成时 left=0，此时恒为 1。
+  const progress = size > 0 ? Math.max(0, Math.min(1, (size - left) / size)) : (left === 0 ? 1 : 0);
+  return {
+    hash: String(t.hashString || ''),
+    name: String(t.name || '(未命名)'),
+    size,
+    progress,
+    state: trState(t.status, t.error),
+    raw_state: String(t.status),
+    dl_rate: positiveFloat(t.rateDownload),
+    up_rate: positiveFloat(t.rateUpload),
+    downloaded,
+    uploaded: positiveInt(t.uploadedEver),
+    eta: Number.isFinite(Number(t.eta)) && Number(t.eta) > 0 ? Number(t.eta) : 0,
+    added_on: positiveInt(t.addedDate),
+    tracker: String(t.tracker || ''),
+    category: String(t.labels && t.labels.length ? t.labels.join(',') : ''),
+    ratio: Number(t.uploadRatio) || 0,
+    amount_left: left
+  };
 }
 
 function makeClient(cfg, timeout) {
@@ -255,4 +374,7 @@ function shortVersion(v) {
   return m ? m[0] : String(v || '');
 }
 
-module.exports = { QBClient, TRClient, makeClient, increment, shortVersion, positiveInt, positiveFloat };
+module.exports = {
+  QBClient, TRClient, makeClient, increment, shortVersion, positiveInt, positiveFloat,
+  qbTorrent, trTorrent, qbState, trState
+};
