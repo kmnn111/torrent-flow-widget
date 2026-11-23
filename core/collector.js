@@ -17,6 +17,9 @@ const NO_SITE_KEY = 'no-site';
 const NO_SITE_INFO = {
   key: NO_SITE_KEY, name: '无站点', full: '本机/私有种子（无 tracker）', host: '', known: true
 };
+/** 归一化后仍属于「下载进行中」的状态。stalled 专指 qB 的 stalledDL：
+    任务还在下载队列里、只是暂时没速度，必须与暂停/做种区分开。 */
+const DOWNLOADING_STATES = new Set(['downloading', 'stalled']);
 
 class Collector {
   constructor(store, onEvent) {
@@ -246,7 +249,13 @@ class Collector {
           // 无站点，后台反查后又跳回真实站），拿聚合值差分会把旧流量重记一遍。
           // 单个种子的 uploaded/downloaded 才是单调的，所以按 hash 上报。
           if (t.hash) torrentRows.push({ hash: t.hash, site: key, up: t.uploaded || 0, dl: t.downloaded || 0 });
-          if (t.state === 'downloading' && t.progress < 1) {
+          // 「正在下载」= qB 里所有未完成任务，包括 stalledDL（有队列、没速度）。
+          // qbState() 把 stalledDL 归一成 'stalled'，若只认 'downloading' 就会把
+          // 停滞种子全剔掉：实测用户 qB 有 5 个下载中，其中 3 个 stalledDL，
+          // 界面只剩 2 个，与 qB 自报数量对不上。TR 的停滞任务仍是 status=3，
+          // 归一后就是 'downloading'，本来就不会漏。
+          // 'stalled' 只由 stalledDL 归一而来（stalledUP 归为 seeding），可安全当作下载中。
+          if (DOWNLOADING_STATES.has(t.state) && t.progress < 1) {
             active.push({
               id: d.id, dl_name: d.name, hash: t.hash, name: t.name,
               progress: t.progress, size: t.size, amount_left: t.amount_left,
@@ -267,6 +276,11 @@ class Collector {
             siteInfo[k] = { name: s.name, full: s.full, host: s.host, known: s.known };
           }
           this.store.recordSiteTrafficByTorrent(ts, torrentRows, siteInfo);
+          // 同时喂入「站点累计」快照：取 qB 服务端种子累计值，换电脑后首轮即恢复。
+          // 这份快照只用于「总计」展示；今日/周/月仍由上面的差分账本负责。
+          const snapshot = {};
+          for (const k in perSite) snapshot[k] = { up: perSite[k].up, dl: perSite[k].dl };
+          this.store.setSiteSnapshot(ts, snapshot);
         } else {
           // 极端兜底：客户端没给 hash（理论上不会发生），退回旧的聚合差分
           this.store.recordSiteTraffic(ts, perSite);

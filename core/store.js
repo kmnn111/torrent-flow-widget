@@ -36,6 +36,10 @@ const NO_SITE_KEY = 'no-site';
 class Store {
   constructor(filePath) {
     this.file = filePath;
+    // 站点累计快照单独存一个小文件，不塞进主账本：
+    // 主账本 ~55MB，每轮写一次会把磁盘 IO 放大到 162GB/h；快照只有几 KB。
+    this.snapshotFile = filePath + '.snapshot';
+    this.siteSnapshot = this._loadSiteSnapshot();
     this.data = this._blank();
     this.load();
     this._dirty = false;
@@ -143,6 +147,56 @@ class Store {
     }, 1200);
   }
   flush() { if (this._saveTimer) { clearTimeout(this._saveTimer); this._saveTimer = null; } if (this._dirty) this.save(); }
+
+  /* ---------- 站点累计快照（跨电脑可恢复） ----------
+     站点「累计」取 qB 当前所有种子按站汇总的 uploaded/downloaded。
+     这些值存在 qB 服务端，多台电脑连同一个 qB 时天然一致，换电脑不会归零。
+     ⚠️ 绝不能拿它做差分算「今日」：站点聚合值随种子归属抖动而涨跌，
+     v1.0.4 就是这么把 695GB 历史存量记成今日流量，虚高 69 倍。
+     这里只用于展示「累计」，日/周/月仍走 site_hourly 的本机差分。 */
+  _loadSiteSnapshot() {
+    const empty = { ts: 0, sites: {} };
+    try {
+      if (!fs.existsSync(this.snapshotFile)) return empty;
+      const p = JSON.parse(fs.readFileSync(this.snapshotFile, 'utf8'));
+      if (!p || typeof p !== 'object' || !p.sites || typeof p.sites !== 'object' || Array.isArray(p.sites)) return empty;
+      const sites = {};
+      for (const k in p.sites) {
+        const v = p.sites[k] || {};
+        sites[k] = { up: Math.max(0, Number(v.up) || 0), dl: Math.max(0, Number(v.dl) || 0) };
+      }
+      return { ts: Number(p.ts) || 0, sites };
+    } catch (e) { return empty; }
+  }
+  /** 每轮种子采集后调用。值没变就不写盘，避免无谓 IO。 */
+  setSiteSnapshot(ts, perSite) {
+    if (!perSite || typeof perSite !== 'object') return false;
+    const sites = {};
+    for (const k in perSite) {
+      if (!k || !String(k).trim()) continue;
+      const v = perSite[k] || {};
+      sites[k] = { up: Math.max(0, Number(v.up) || 0), dl: Math.max(0, Number(v.dl) || 0) };
+    }
+    const prev = this.siteSnapshot.sites || {};
+    const pk = Object.keys(prev), nk = Object.keys(sites);
+    let same = pk.length === nk.length;
+    if (same) {
+      for (const k of nk) {
+        if (!prev[k] || prev[k].up !== sites[k].up || prev[k].dl !== sites[k].dl) { same = false; break; }
+      }
+    }
+    this.siteSnapshot.ts = Number(ts) || 0;
+    if (same) return false;
+    this.siteSnapshot.sites = sites;
+    try {
+      const dir = path.dirname(this.snapshotFile);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      const tmp = this.snapshotFile + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(this.siteSnapshot), 'utf8');
+      fs.renameSync(tmp, this.snapshotFile);
+      return true;
+    } catch (e) { console.error('[store] snapshot save failed', e.message); return false; }
+  }
 
   /* ---------- 下载器 CRUD ---------- */
   listDownloaders() {
@@ -561,7 +615,11 @@ class Store {
     const now = Math.floor(Date.now() / 1000);
     const cur = { day: tu.dayKey(now), week: tu.weekKey(now), month: tu.monthKey(now), year: tu.yearKey(now) };
     const out = [];
-    const keys = new Set([...Object.keys(this.data.site_hourly), ...Object.keys(this.data.site_meta)]);
+    const keys = new Set([
+      ...Object.keys(this.data.site_hourly),
+      ...Object.keys(this.data.site_meta),
+      ...Object.keys(this.siteSnapshot.sites || {})
+    ]);
     for (const key of keys) {
       // 历史版本可能写入过空 key 的"幽灵站点"（旧版 collector 用 identify('') 兜底）。
       // 汇总时跳过，避免它继续占据排行首位。
@@ -581,12 +639,22 @@ class Store {
         if (b.month === cur.month) { acc.month.dl += dl; acc.month.up += up; }
         if (b.year === cur.year) { acc.year.dl += dl; acc.year.up += up; }
       }
+      // 「累计」优先用 qB 种子快照：它存在 NAS 上，换电脑也还在。
+      // 快照缺失该站（例如还没采到）才退回本机 hourly 账本，保证老用户不倒退。
+      // 注意 day/week/month/year 始终用 hourly 差分，绝不能用快照，否则重演
+      // v1.0.4「把种子历史存量当今日流量」的事故。
+      const snap = (this.siteSnapshot.sites || {})[key];
+      const allFromQb = !!snap && (snap.up > 0 || snap.dl > 0);
+      const all = allFromQb
+        ? { up: snap.up, dl: snap.dl }
+        : { up: acc.all.up, dl: acc.all.dl };
       const m = this.data.site_meta[key] || { name: key, full: '', known: false };
       out.push({
         key, name: m.name || key, full: m.full || '', host: m.host || '',
         known: !!m.known, last_seen: m.last_seen || 0,
-        day: acc.day, week: acc.week, month: acc.month, year: acc.year, all: acc.all,
-        total: acc.all.up + acc.all.dl
+        day: acc.day, week: acc.week, month: acc.month, year: acc.year, all,
+        all_from: allFromQb ? 'qb' : 'local',
+        total: all.up + all.dl
       });
     }
     // 有流量的排前面；同流量按站点名稳定排序，避免界面每次刷新跳位

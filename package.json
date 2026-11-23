@@ -12,7 +12,7 @@
     "pack": "electron-builder --win dir",
     "release:prepare": "node scripts/prepare-release.js",
     "release": "npm run dist && node scripts/prepare-release.js",
-    "test": "node tests/core.js && node tests/regression.js && node tests/traffic.js && node tests/sites.js && node tests/site-fix.js"
+    "test": "node tests/core.js && node tests/regression.js && node tests/traffic.js && node tests/sites.js && node tests/site-fix.js && node tests/active-torrents.js && node tests/site-snapshot.js"
   },
   "devDependencies": {
     "electron": "^33.0.0",

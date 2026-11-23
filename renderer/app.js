@@ -735,7 +735,7 @@
     return str.slice(0, head) + '…' + str.slice(str.length - tail);
   };
   const STATE_TEXT = {
-    downloading: '下载中', stalled: '等待中', seeding: '做种', paused: '暂停', error: '出错', checking: '校验中', other: '—'
+    downloading: '下载中', stalled: '停滞', seeding: '做种', paused: '暂停', error: '出错', checking: '校验中', other: '—'
   };
   function fmtEta(sec) {
     const n = Number(sec) || 0;
@@ -842,9 +842,16 @@
     const nDl = noSiteRow ? (noSiteRow[p].dl || 0) : 0;
     $('siteTotUp').textContent = '↑' + fmtBytes(tot.up);
     $('siteTotDl').textContent = '↓' + fmtBytes(tot.dl);
-    $('siteNote').textContent = (nUp + nDl) > 0
-      ? `另有本机/私有种子 ↑${fmtBytes(nUp)} ↓${fmtBytes(nDl)}，不计入站点`
-      : '';
+    // 口径说明：「总计」取 qB 种子历史累计（存在 NAS 上，换电脑不丢）；
+    // 今日/本周只是本机观测到的增量，两者对不上是正常的，必须讲清楚免得再被当成 bug。
+    const notes = [];
+    if (p === 'all' && all.some(s => s.all_from === 'qb')) {
+      notes.push('总计含 qB 种子历史，换电脑不丢');
+    }
+    if ((nUp + nDl) > 0) {
+      notes.push(`另有本机/私有种子 ↑${fmtBytes(nUp)} ↓${fmtBytes(nDl)}，不计入站点`);
+    }
+    $('siteNote').textContent = notes.join(' · ');
     const max = Math.max(...rows.map(s => Math.max(s[p].up, s[p].dl)), 1);
     // 全量重建会让滚动位置归零：用户正在往下翻站点时，每 30s 一次的数据刷新
     // 都把他弹回顶部，等于这个列表没法翻。重建前后保存/恢复滚动偏移。
