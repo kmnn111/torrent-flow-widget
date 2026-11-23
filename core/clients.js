@@ -29,7 +29,18 @@ function request(url, { method = 'GET', headers = {}, body = null, timeout = 500
     const mod = u.protocol === 'https:' ? https : http;
     const h = Object.assign({}, headers);
     if (cookie) h['Cookie'] = cookie;
-    if (body && !h['Content-Type']) h['Content-Type'] = 'application/x-www-form-urlencoded';
+    // ⚠️ 必须显式给 Content-Length。若把字符串直接交给 req.write()，Node 会用
+    // transfer-encoding: chunked；qBittorrent 的 /api/v2/auth/login 不解析 chunked body，
+    // 它会把「0x20」这种块长度当成 HTTP 头（日志里 invalid http header: "20"），
+    // 导致收到的用户名是空的 → 记为一次失败登录。每 5 秒重试，连续 5 次后 qB
+    // 把本机 IP 封进内存黑名单，之后即使密码正确也一律「用户名或密码错误」。
+    // 转成 Buffer + 显式长度后走普通定长请求，不再触发 chunked。
+    let bodyBuf = null;
+    if (body != null && body !== '') {
+      bodyBuf = Buffer.isBuffer(body) ? body : Buffer.from(String(body), 'utf8');
+      if (!h['Content-Type']) h['Content-Type'] = 'application/x-www-form-urlencoded';
+      if (!h['Content-Length'] && !h['content-length']) h['Content-Length'] = String(bodyBuf.length);
+    }
     const req = mod.request(u, { method, headers: h, timeout }, res => {
       const chunks = [];
       res.on('data', c => chunks.push(c));
@@ -42,7 +53,7 @@ function request(url, { method = 'GET', headers = {}, body = null, timeout = 500
     });
     req.on('timeout', () => { req.destroy(new Error('请求超时')); });
     req.on('error', reject);
-    if (body) req.write(body);
+    if (bodyBuf) req.write(bodyBuf);
     req.end();
   });
 }

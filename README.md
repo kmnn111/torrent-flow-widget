@@ -74,6 +74,44 @@
 - 空态界面明确提示"尚未配置下载器"并给出「去设置」入口
 - 只有你亲手添加的真实下载器才会出现，所有数字都来自实际采集
 
+## 🆕 v1.0.7 · 登录封 IP / 下载列表 / 跨电脑累计
+
+> **已发布（2026-11-23）**：到 [Releases](https://github.com/kmnn111/torrent-flow-widget/releases/latest) 下载 `TorrentFlow-Setup-1.0.7.exe`。v1.0.6 用户启动后会自动收到更新提醒。
+
+这一版合并了两条线各自修的问题：**v1.0.6 的 qB 登录封 IP 修复**（当时在另一台电脑上改的，代码没进这个仓库）+ 本机的下载列表与累计口径修复。
+
+**1. qB 登录被封 IP（chunked 编码）**
+
+回到本地网络后 qB WebUI 提示「用户名或密码错误」，浏览器也登不上，但密码没改。根因不是密码，是应用把自己的 IP 打进了 qB 封禁名单：
+
+- 登录请求体用字符串直接 `req.write()`，没设 `Content-Length`，Node 自动改用 `transfer-encoding: chunked`
+- qBittorrent 的 `/api/v2/auth/login` 不解析 chunked body，把块长度（`0x20`）当成 HTTP 头解析，日志留下 `invalid http header: "20"`，收到的用户名是空的
+- 每 5 秒登录一次、连续 5 次失败后 qB 封禁该 IP；之后即使密码正确也一律拒绝，界面只显示「用户名或密码错误」，极具误导性
+
+修复：`core/clients.js` 把请求体转 Buffer 并显式设置 `Content-Length`。新增 `tests/http-body.js`（6 项）用本地假服务器校验请求头，回退修复时 3 项会失败，确保不是假测试。
+
+> 已被封的 IP：qB 的封禁记录在内存里，改配置没用，需**先关掉仍在发失败请求的旧版应用**，再重启 qB 容器清记录，否则刚解封又会被封。
+
+**2. 「正在下载」数量与 qB 不符**
+
+qB 的 `stalledDL`（有队列、暂时没速度）归一化为 `stalled`，而采集器只收 `downloading`，导致停滞种子全被剔掉。实测你 qB 有 5 个下载中（2 个有速度 + 3 个 `stalledDL`），界面只剩 2 个。现在全部显示，没速度的标「停滞」；做种与暂停仍不计入。
+
+**3. 换电脑后站点累计归零**
+
+原本站点累计只来自本机 hourly 差分账本，换电脑即空账本。现在「总计」取 qB 各站种子 `uploaded/downloaded` 的汇总快照——你的 qB 在绿联 NAS 上，多台电脑连同一个，第一轮采集即恢复。快照存在独立小文件 `traffic.json.snapshot`（几 KB），不塞进 55MB 主账本，值未变不写盘，重启后无跳变；快照缺失时回退本机账本，老数据不倒退。
+
+**今日/周/月仍严格走差分，绝不拿快照算增量**——v1.0.4 就是拿 695GB 种子历史当今日流量，虚高 69 倍。所以「总计」和「今日」对不上是预期行为，界面在总计页脚注写明「总计含 qB 种子历史，换电脑不丢」。
+
+**测试**：新增 `tests/http-body.js`（6 项）、`tests/packaging.js`（12 项）、`tests/active-torrents.js`（8 项）、`tests/site-snapshot.js`（15 项），全套 **157 项**通过。打包完整性测试守住 `charts.js` / `icons.js` / 字体不再漏打。
+
+---
+
+## v1.0.6 · 修复 qB 登录被封 IP（chunked 编码）
+
+> **已发布（2026-11-22）**：到 [Releases](https://github.com/kmnn111/torrent-flow-widget/releases/tag/v1.0.6) 下载 `TorrentFlow-Setup-1.0.6.exe`。该版本由另一台电脑构建发布，修复内容已合并进 v1.0.7。
+
+---
+
 ## 🆕 v1.0.5 · PT 记账重写：修掉「天空今日下载 1.2 TB」
 
 > **已发布（2026-11-19）**：到 [Releases](https://github.com/kmnn111/torrent-flow-widget/releases/latest) 下载 `TorrentFlow-Setup-1.0.5.exe`。v1.0.4 用户启动后会自动收到更新提醒。
@@ -264,6 +302,8 @@ PT 站的今日/本周流量**不是**用种子的累计值直接切分。`uploa
 ## 📋 目录
 
 - [功能一览](#-功能一览)
+- [v1.0.7 · 登录封 IP / 下载列表 / 跨电脑累计](#-v107--登录封-ip--下载列表--跨电脑累计)
+- [v1.0.6 · 修复 qB 登录被封 IP（chunked 编码）](#v106--修复-qb-登录被封-ipchunked-编码)
 - [v1.0.5 · PT 记账重写：修掉「天空今日下载 1.2 TB」](#-v105--pt-记账重写修掉天空今日下载-12-tb)
 - [v1.0.4 · 切换动画与站点面板修复](#-v104--切换动画与站点面板修复)
 - [v1.0.3 · 正在下载 + PT 站点流量](#-v103--正在下载--pt-站点流量)

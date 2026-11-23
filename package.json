@@ -1,7 +1,7 @@
 {
   "name": "torrent-flow-widget",
   "productName": "流量台",
-  "version": "1.0.5",
+  "version": "1.0.7",
   "description": "宫崎骏风格 Windows 桌面流量监控挂件：qBittorrent / Transmission 累计计数器差分统计，日/周/月/年对账，玻璃拟态 UI + 吸顶小窗 + 托盘",
   "main": "main.js",
   "author": "大软子哥哥",
@@ -12,7 +12,7 @@
     "pack": "electron-builder --win dir",
     "release:prepare": "node scripts/prepare-release.js",
     "release": "npm run dist && node scripts/prepare-release.js",
-    "test": "node tests/core.js && node tests/regression.js && node tests/traffic.js && node tests/sites.js && node tests/site-fix.js && node tests/active-torrents.js && node tests/site-snapshot.js"
+    "test": "node tests/core.js && node tests/regression.js && node tests/traffic.js && node tests/sites.js && node tests/site-fix.js && node tests/active-torrents.js && node tests/site-snapshot.js && node tests/http-body.js && node tests/packaging.js"
   },
   "devDependencies": {
     "electron": "^33.0.0",
